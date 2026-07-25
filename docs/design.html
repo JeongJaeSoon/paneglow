@@ -1,0 +1,779 @@
+<title>Codex Micro pane 대시보드 — 설계</title>
+
+<style>
+  :root {
+    --ink:#14161C; --ink-soft:#4A505E; --ink-faint:#7C8496;
+    --ground:#F6F7FA; --card:#FFFFFF; --rule:#DFE3EB; --rule-soft:#ECEFF4;
+    --accent:#304FFE; --accent-dim:#E8EBFF;
+    --waiting:#FF6D00; --done:#00B33A; --error:#FF0033; --idle:#9AA2B4;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard",
+            "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --step--1: clamp(.76rem,.74rem + .1vw,.82rem);
+    --step-0:  clamp(.94rem,.9rem + .18vw,1rem);
+    --step-1:  clamp(1.1rem,1rem + .4vw,1.25rem);
+    --step-2:  clamp(1.35rem,1.15rem + .8vw,1.75rem);
+    --step-3:  clamp(1.7rem,1.3rem + 1.6vw,2.5rem);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink:#E8EBF2; --ink-soft:#A6AEC0; --ink-faint:#6E778A;
+      --ground:#0D0F14; --card:#161A22; --rule:#262C38; --rule-soft:#1D222B;
+      --accent:#7C8CFF; --accent-dim:#1C2340;
+      --waiting:#FF8A2B; --done:#2FD968; --error:#FF4D6A; --idle:#5C6478;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink:#E8EBF2; --ink-soft:#A6AEC0; --ink-faint:#6E778A;
+    --ground:#0D0F14; --card:#161A22; --rule:#262C38; --rule-soft:#1D222B;
+    --accent:#7C8CFF; --accent-dim:#1C2340;
+    --waiting:#FF8A2B; --done:#2FD968; --error:#FF4D6A; --idle:#5C6478;
+  }
+  :root[data-theme="light"] {
+    --ink:#14161C; --ink-soft:#4A505E; --ink-faint:#7C8496;
+    --ground:#F6F7FA; --card:#FFFFFF; --rule:#DFE3EB; --rule-soft:#ECEFF4;
+    --accent:#304FFE; --accent-dim:#E8EBFF;
+    --waiting:#FF6D00; --done:#00B33A; --error:#FF0033; --idle:#9AA2B4;
+  }
+  body { background:var(--ground); color:var(--ink); font-family:var(--sans);
+         font-size:var(--step-0); line-height:1.72; -webkit-font-smoothing:antialiased; }
+  .shell { display:grid; grid-template-columns:15rem minmax(0,1fr); gap:3.5rem;
+           max-width:76rem; margin:0 auto; padding:3rem 1.75rem 6rem; align-items:start; }
+  @media (max-width:62rem){ .shell{grid-template-columns:1fr;gap:2rem} nav.toc{position:static} }
+
+  nav.toc { position:sticky; top:2rem; font-family:var(--mono); font-size:var(--step--1); }
+  nav.toc h2 { font-size:var(--step--1); letter-spacing:.14em; text-transform:uppercase;
+               color:var(--ink-faint); font-weight:500; margin-bottom:.9rem; }
+  nav.toc ol { list-style:none; display:flex; flex-direction:column; gap:.1rem; counter-reset:toc; }
+  nav.toc a { display:flex; gap:.6rem; padding:.3rem .5rem; border-radius:3px;
+              color:var(--ink-soft); text-decoration:none; border-left:2px solid transparent; }
+  nav.toc a::before { counter-increment:toc; content:counter(toc,decimal-leading-zero); color:var(--ink-faint); }
+  nav.toc a:hover, nav.toc a:focus-visible { color:var(--accent); border-left-color:var(--accent);
+              background:var(--rule-soft); outline:none; }
+
+  header.doc { border-bottom:1px solid var(--rule); padding-bottom:2rem; margin-bottom:3rem; }
+  .eyebrow { font-family:var(--mono); font-size:var(--step--1); letter-spacing:.16em;
+             text-transform:uppercase; color:var(--accent); margin-bottom:.8rem; }
+  header.doc h1 { font-size:var(--step-3); line-height:1.12; letter-spacing:-.02em;
+                  font-weight:600; text-wrap:balance; margin-bottom:.9rem; }
+  .lede { color:var(--ink-soft); max-width:46rem; font-size:var(--step-1); }
+  .meta { display:flex; flex-wrap:wrap; gap:.5rem 1.4rem; margin-top:1.4rem;
+          font-family:var(--mono); font-size:var(--step--1); color:var(--ink-faint); }
+  .meta b { color:var(--ink-soft); font-weight:500; }
+
+  section { margin-bottom:3.5rem; scroll-margin-top:2rem; }
+  section > h2 { font-family:var(--mono); font-size:var(--step-2); font-weight:600;
+                 letter-spacing:-.01em; margin-bottom:.35rem; display:flex; gap:.75rem; align-items:baseline; }
+  section > h2 .num { color:var(--accent); font-size:var(--step-0); }
+  section > h2 + .sub { color:var(--ink-faint); margin-bottom:1.6rem; max-width:46rem; }
+  h3 { font-size:var(--step-1); font-weight:600; margin:2.2rem 0 .7rem; letter-spacing:-.01em; text-wrap:balance; }
+  h4 { font-family:var(--mono); font-size:var(--step-0); font-weight:600; margin:1.5rem 0 .5rem; }
+  p { max-width:46rem; margin-bottom:.9rem; }
+  ul, ol { max-width:46rem; margin-bottom:1rem; padding-left:1.15rem; }
+  li { margin-bottom:.35rem; }
+  code { font-family:var(--mono); font-size:.89em; background:var(--rule-soft);
+         padding:.1em .35em; border-radius:3px; color:var(--ink); }
+  strong { font-weight:650; }
+  a { color:var(--accent); }
+
+  .callout { border-left:3px solid var(--accent); background:var(--card);
+             padding:1rem 1.3rem; border-radius:0 4px 4px 0; margin:1.4rem 0; max-width:46rem; }
+  .callout.warn { border-left-color:var(--error); }
+  .callout.note { border-left-color:var(--waiting); }
+  .callout p:last-child, .callout ul:last-child { margin-bottom:0; }
+  .callout .label { font-family:var(--mono); font-size:var(--step--1); letter-spacing:.1em;
+             text-transform:uppercase; color:var(--accent); display:block; margin-bottom:.4rem; }
+  .callout.warn .label { color:var(--error); }
+  .callout.note .label { color:var(--waiting); }
+
+  .tw { overflow-x:auto; margin:1.2rem 0; border:1px solid var(--rule); border-radius:5px; background:var(--card); }
+  table { border-collapse:collapse; width:100%; font-size:var(--step--1); }
+  th, td { text-align:left; padding:.62rem .9rem; border-bottom:1px solid var(--rule-soft); vertical-align:top; }
+  thead th { font-family:var(--mono); font-weight:500; letter-spacing:.06em; text-transform:uppercase;
+             color:var(--ink-faint); font-size:.74rem; border-bottom:1px solid var(--rule); white-space:nowrap; }
+  tbody tr:last-child td { border-bottom:none; }
+  td code { background:none; padding:0; color:var(--ink-soft); }
+
+  .chip { display:inline-flex; align-items:center; gap:.32rem; font-family:var(--mono);
+          font-size:.72rem; padding:.12rem .45rem; border-radius:3px; white-space:nowrap;
+          border:1px solid currentColor; line-height:1.6; }
+  .chip.ok{color:var(--done)} .chip.no{color:var(--error)}
+  .chip.warn{color:var(--waiting)} .chip.idle{color:var(--idle)}
+  .chip::before { content:""; width:.42em; height:.42em; border-radius:50%; background:currentColor; }
+
+  pre.flow { font-family:var(--mono); font-size:.76rem; line-height:1.75; overflow-x:auto;
+             background:var(--card); border:1px solid var(--rule); border-radius:5px;
+             padding:1.1rem 1.3rem; color:var(--ink-soft); margin:1.2rem 0; }
+  pre.flow b { color:var(--accent); font-weight:500; }
+
+  hr { border:none; border-top:1px solid var(--rule); margin:3rem 0; }
+  footer { color:var(--ink-faint); font-size:var(--step--1); font-family:var(--mono);
+           padding-top:1.5rem; border-top:1px solid var(--rule); }
+  @media (prefers-reduced-motion:reduce){ *{transition:none!important;animation:none!important} }
+</style>
+
+<div class="shell">
+
+<nav class="toc" aria-label="목차">
+  <h2>목차</h2>
+  <ol>
+    <li><a href="#ctx">배경과 요구사항</a></li>
+    <li><a href="#base">전제 — 하드웨어</a></li>
+    <li><a href="#own">소유권 — 두 게이트</a></li>
+    <li><a href="#map">6키와 두 뷰</a></li>
+    <li><a href="#glow">테두리</a></li>
+    <li><a href="#state">상태 — 훅과 저장</a></li>
+    <li><a href="#gen">세대와 입력 안전</a></li>
+    <li><a href="#mod">모듈과 흐름</a></li>
+    <li><a href="#err">경계 조건과 실패</a></li>
+    <li><a href="#cfg">설정</a></li>
+    <li><a href="#ops">운용과 설치</a></li>
+    <li><a href="#ver">검증 현황</a></li>
+    <li><a href="#out">범위 밖</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<header class="doc">
+  <div class="eyebrow">설계 문서 · 구현 미착수</div>
+  <h1>Codex Micro pane 대시보드</h1>
+  <p class="lede">
+    Codex Micro 매크로패드를 iTerm2 병렬 Claude Code 워크플로우의 상태 표시기 겸
+    제어 장치로 쓴다. 6개 Agent 키가 현재 탭의 pane별 상태를 색으로 보여주고,
+    누르면 그 pane으로 이동한다.
+  </p>
+  <div class="meta">
+    <span><b>잠정 이름</b> paneglow</span>
+    <span><b>작성</b> 2026-07-25</span>
+    <span><b>하드웨어 사실</b> <a href="hardware-notes.md">hardware-notes-codex-micro.md</a></span>
+  </div>
+</header>
+
+<!-- 01 -->
+<section id="ctx">
+  <h2><span class="num">01</span> 배경과 요구사항</h2>
+
+  <p>
+    기존 OSS <a href="https://github.com/eliBenven/freemicro">FreeMicro</a>를 설치해 써봤으나
+    <strong>같은 디렉터리의 세션을 키 하나로 합쳐버려</strong> 한 repo에서 pane 4~6개를
+    병렬로 돌리는 방식과 맞지 않았다. 그 외 설치 부담과 Codex 앱과의 LED 경합도 있었다.
+  </p>
+
+  <div class="tw"><table>
+    <thead><tr><th style="width:3.5rem">#</th><th>요구</th></tr></thead>
+    <tbody>
+      <tr><td><code>R1</code></td><td>각 pane의 Claude Code 상태를 <strong>키별 색</strong>으로 표시</td></tr>
+      <tr><td><code>R2</code></td><td>키를 눌러 <strong>해당 pane으로 전환</strong></td></tr>
+      <tr><td><code>R3</code></td><td>탭이 바뀌면 그 탭의 pane들로 매핑이 따라감</td></tr>
+      <tr><td><code>R4</code></td><td><strong>Codex를 볼 때 6키를 완전히 양보</strong> — 표시와 키 동작이 순정과 같을 것.
+          <br><span style="color:var(--ink-faint)">6키에 한정한다. 테두리는 계속 쓴다(<a href="#glow">05</a>), 완전한 격리는 불가능하다(<a href="#own">03</a>)</span></td></tr>
+      <tr><td><code>R5</code></td><td>테두리 LED도 상태 표현에 활용, 표시 내용은 설정 가능</td></tr>
+      <tr><td><code>R6</code></td><td><strong>패드 락 충돌이 없을 것</strong> — 패드를 두고 다투는 우리 프로세스는 하나뿐.
+          <br><span style="color:var(--ink-faint)">아래 “R6의 정직한 범위” 참조</span></td></tr>
+      <tr><td><code>R7</code></td><td>탭 전환은 <strong>직접 주소 지정</strong>과 <strong>순차 순환</strong>을 모두 제공하고 각각 끌 수 있을 것</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout warn">
+    <span class="label">R6의 정직한 범위</span>
+    <p>
+      FreeMicro를 걷어낸 사유는 넷이었는데(pane 개별 처리 불가, 설치 부담, TCC 권한, 락 충돌),
+      이 설계도 <strong>Input Monitoring 권한과 상주 데몬을 그대로 요구한다.</strong>
+      6키 LED가 벤더 채널을 쓰는 이상 피할 수 없다.
+    </p>
+    <p>실제로 줄어드는 것은 이것뿐이다:</p>
+    <ul>
+      <li><strong>패드 락 충돌 없음</strong> — 웹 편집기·데몬·CLI가 서로 패드를 뺏던 구조가 없다. 프로세스는 데몬 하나</li>
+      <li><strong>훅 미설치 세션도 보인다</strong> — <code>jobName</code>으로 pane을 찾으므로(<a href="#state">06</a>), 훅 설치 후 재시작 전까지 통째로 안 보이는 문제가 없다</li>
+      <li><strong>Accessibility 권한 불필요</strong> — 키를 합성하지 않고 iTerm2 API로 pane을 고른다</li>
+    </ul>
+    <p>“설치가 가벼워진다”는 <strong>주장하지 않는다.</strong></p>
+  </div>
+</section>
+
+<!-- 02 -->
+<section id="base">
+  <h2><span class="num">02</span> 전제 — 하드웨어</h2>
+  <p class="sub">
+    설계가 딛고 선 실측 사실. 근거와 측정 방법은
+    <a href="hardware-notes.md">하드웨어 노트</a>에 있다.
+  </p>
+
+  <div class="tw"><table>
+    <thead><tr><th>기능</th><th style="width:9rem">Layer 1</th><th style="width:9rem">Layer 2+</th></tr></thead>
+    <tbody>
+      <tr><td>A키·C키·노브 → 벤더 이벤트</td><td><span class="chip ok">있음</span></td><td><span class="chip no">없음</span></td></tr>
+      <tr><td>키 → 표준 스캔코드</td><td><span class="chip no">없음</span></td><td><span class="chip ok">있음</span></td></tr>
+      <tr><td><strong>A1~A6 개별 색</strong> (<code>thstatus</code>)</td><td><span class="chip ok">가능</span></td><td><span class="chip no">무시됨</span></td></tr>
+      <tr><td>C키 백라이트 / 테두리 (<code>rgbcfg</code>)</td><td><span class="chip ok">가능</span></td><td><span class="chip ok">가능</span></td></tr>
+    </tbody>
+  </table></div>
+
+  <p>
+    <strong>Layer 1만이 R1(개별 색)과 R2(입력)를 동시에 만족한다.</strong> 따라서 무대는 Layer 1이고,
+    Layer 2+는 사용자 커스텀 영역으로 남긴다.
+  </p>
+  <p>여기서 파생되는 제약 셋:</p>
+  <ul>
+    <li><strong>LED는 읽을 수 없다</strong> — 누가 덮어썼는지 감지할 방법이 없다</li>
+    <li><strong>디바이스가 non-exclusive로 열린다</strong> — 벤더 앱의 이벤트 수신을 막을 수 없다</li>
+    <li><strong>성공 리턴 코드는 무의미하다</strong> — <code>device.status</code> 왕복만이 검증 수단</li>
+  </ul>
+</section>
+
+<!-- 03 -->
+<section id="own">
+  <h2><span class="num">03</span> 소유권 — 두 게이트</h2>
+  <p class="sub">레이어 게이트가 “동작할지”를, frontmost 게이트가 “무엇을 소유할지”를 정한다.</p>
+
+  <h3>레이어 게이트</h3>
+  <p>
+    <code>layer_index != 1</code>이면 <strong>6키(<code>thstatus</code>)와 입력을 모두 포기</strong>한다.
+    다만 테두리는 Layer 2+에서도 하드웨어가 지원하므로 설정으로 유지할 수 있다.
+  </p>
+<pre class="flow">"layer_gate": { "keys": "off", "underglow": "keep" }   <b>// underglow: keep | off</b></pre>
+
+  <div class="callout note">
+    <span class="label">레이어로 “끄기”를 하지 말 것</span>
+    <p>
+      터치 센서는 <strong>순환</strong>이라 Layer 2로 나갔다 돌아오려면 최대 5탭이고,
+      그 과정에서 사용자가 설정해둔 커스텀 레이어가 차례로 활성화된다.
+      잠깐 끄려던 동작이 키맵을 훑고 지나간다.
+    </p>
+    <p>
+      끄기는 <code>gate.mode: "off"</code>(소프트웨어)로 한다.
+      레이어 순환은 <strong>커스텀 용도로 남긴다.</strong>
+    </p>
+  </div>
+
+  <h3>frontmost 게이트 — 존별로 소유권이 다르다</h3>
+  <p>
+    “침묵한다”가 아니라 <strong>어느 존을 양보하는지</strong>를 존 단위로 정한다.
+    이렇게 해야 R4(6키 양보)와 R5(테두리 활용)가 충돌하지 않는다.
+  </p>
+
+  <div class="tw"><table>
+    <thead><tr>
+      <th style="width:11rem">보고 있는 앱</th><th style="width:9rem">6키</th>
+      <th style="width:9rem">테두리</th><th>A키 입력</th>
+    </tr></thead>
+    <tbody>
+      <tr><td><strong>ChatGPT</strong></td><td>벤더에게 양보</td><td><strong>우리가 유지</strong></td><td>처리 안 함</td></tr>
+      <tr><td><strong>iTerm2</strong></td><td>우리</td><td>우리</td><td>처리</td></tr>
+      <tr><td>그 외</td><td colspan="3"><strong>직전 소유권 유지</strong> — 직전이 iTerm2였으면 그 탭까지 유지하고 입력도 처리한다.
+          직전이 ChatGPT였으면 입력을 처리하지 않는다</td></tr>
+      <tr><td><em>기동 직후</em></td><td colspan="3">관심 앱이 처음 frontmost가 될 때까지 <strong>무소유</strong> — 6키 소등, 입력 처리 안 함</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>
+    감지는 <strong><code>NSWorkspace</code> 활성 앱 변경 알림</strong>으로 한다(폴링 폴백 1초).
+    식별자는 표시 이름이 아니라 <strong>bundle identifier</strong>다 — 표시 이름은 언어·버전에 따라 바뀐다.
+    이 경로는 TCC 권한이 필요 없다.
+  </p>
+
+  <h4>양보할 때는 6키를 끄고 넘긴다</h4>
+  <p>
+    벤더가 언제 다시 그리는지 알 수 없으므로, 그냥 손을 떼면 <strong>우리 pane 색이 그대로 남아
+    사용자가 Codex 스레드 상태로 오독한다.</strong> 양보 시점에 6키를 명시적으로 소등한 뒤 넘긴다.
+  </p>
+
+  <div class="callout warn">
+    <span class="label">막을 수 없는 것</span>
+    <p>
+      디바이스가 non-exclusive라 <strong>iTerm2를 보면서 A키를 눌러도 ChatGPT 앱이
+      백그라운드에서 자기 스레드를 바꾼다.</strong> 상대 프로세스의 수신을 막을 수단이 없다.
+      (벤더 동작이 백그라운드 선택이라 창은 안 뜨는 것으로 <em>보이나</em> 미검증 — <a href="#ver">12</a>)
+    </p>
+    <p>
+      반대 방향은 깨끗하다 — Codex를 볼 때 우리는 6키를 건드리지 않는다.
+      <strong>R4는 이 방향에만 적용된다.</strong>
+    </p>
+  </div>
+
+  <h4>LED 경합 — 완화이지 해결이 아니다</h4>
+  <p>
+    LED를 읽을 수 없으니 덮어쓰기를 감지할 수 없다. 주기적 재도색은 last-writer 경쟁이라
+    깜빡임과 채널 경쟁을 부르므로 <strong>하지 않는다.</strong>
+    <strong>이름 붙일 수 있는 사건에서만</strong> 다시 칠한다 —
+    게이트 전환, 레이어 변화, 패드 재연결, 절전 복귀, pane 구성 변경.
+    그 사이 벤더가 덮어쓴 색은 다음 사건까지 남는다.
+  </p>
+</section>
+
+<!-- 04 -->
+<section id="map">
+  <h2><span class="num">04</span> 6키와 두 뷰</h2>
+
+  <div class="tw"><table>
+    <thead><tr>
+      <th style="width:8rem">뷰</th><th style="width:13rem">A1~A6이 뜻하는 것</th>
+      <th>LED 색</th><th style="width:9rem">누르면</th>
+    </tr></thead>
+    <tbody>
+      <tr><td><strong>pane 뷰</strong><br><span style="color:var(--ink-faint);font-size:.9em">기본</span></td>
+          <td>현재 탭의 pane들<br>화면 배치 순서(좌→우, 위→아래)</td>
+          <td>그 pane의 상태</td><td>그 pane으로 이동</td></tr>
+      <tr><td><strong>탭 뷰</strong><br><span style="color:var(--ink-faint);font-size:.9em">MOD 누른 동안</span></td>
+          <td>탭 1~6<br><code>cmd+1/2/3</code>과 같은 순서</td>
+          <td>그 탭의 최고 우선순위 상태</td><td>그 탭으로 전환</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>
+    같은 6개 LED로 두 계층을 표현한다. <strong><code>MOD+A3</code>은 언제나 탭 3</strong>이라
+    순환이 아닌 직접 주소 지정이고, 근육 기억이 생긴다.
+  </p>
+
+  <h3>MOD 키</h3>
+  <p>
+    기본 <code>C7</code>. <strong><code>C5</code>·<code>C6</code>은 넓은 캡 하나를 공유해
+    두 id가 함께 발생하므로 후보에서 제외</strong>한다. <code>KNOB_PRESS</code>도 가능하다.
+  </p>
+
+  <div class="callout warn">
+    <span class="label">MOD 고착을 막는다</span>
+    <p>
+      MOD를 누른 채 레이어를 바꾸거나 앱을 전환하면 <strong>release가 오지 않는다</strong> —
+      Layer 2+에는 벤더 이벤트가 아예 없고, 게이트가 닫히면 입력을 버리기 때문이다.
+      그대로 두면 Layer 1으로 돌아왔을 때 A키가 전부 탭 전환으로 동작하고 사용자는 이유를 알 수 없다.
+    </p>
+    <ul>
+      <li>게이트 전환·레이어 변화 시 <strong>MOD 상태를 무조건 리셋</strong></li>
+      <li>press 후 <strong>5초간 이벤트가 없으면 자동 해제</strong></li>
+    </ul>
+  </div>
+
+  <h3>키 동작</h3>
+  <div class="tw"><table>
+    <thead><tr><th style="width:13rem">입력</th><th>동작</th></tr></thead>
+    <tbody>
+      <tr><td>A1~A6 탭</td><td>그 pane으로 포커스 이동 (백그라운드 선택)</td></tr>
+      <tr><td>A1~A6 더블탭</td><td>이동 + iTerm2 창을 맨 앞으로</td></tr>
+      <tr><td><strong>MOD + A1~A6</strong></td><td>탭 직접 전환. 누르는 동안 LED도 탭 뷰</td></tr>
+      <tr><td>노브 회전</td><td>탭 순차 전환 <span class="chip idle">R7</span></td></tr>
+      <tr><td>C2 ✓ / C3 ✗</td><td>승인 / 거절 — 아래</td></tr>
+      <tr><td>그 외 C키 · 조이스틱</td><td>관여하지 않음</td></tr>
+    </tbody>
+  </table></div>
+  <p>
+    노브는 회전이 <code>act=2</code>로 오고 press/release 쌍이 없다.
+    키와 같은 <code>act==1</code> 필터를 걸면 다이얼이 통째로 죽는다.
+  </p>
+
+  <h3>승인·거절 — 대상은 “지금 보고 있는 pane”</h3>
+  <p>
+    승인은 <strong>되돌릴 수 없는 유일한 동작</strong>이므로 대상을 <em>찾지</em> 않는다.
+    이미 포커스된 pane에만 보낸다.
+  </p>
+  <div class="tw"><table>
+    <thead><tr><th style="width:17rem">조건</th><th>동작</th></tr></thead>
+    <tbody>
+      <tr><td>iTerm2가 frontmost 아님</td><td><strong>no-op</strong></td></tr>
+      <tr><td>포커스된 pane이 <code>waiting</code> 아님</td><td><strong>no-op</strong></td></tr>
+      <tr><td>전송 직전 재확인에서 상태가 바뀜</td><td><strong>no-op</strong></td></tr>
+      <tr><td>위를 모두 통과</td><td>그 pane에 답을 보낸다</td></tr>
+    </tbody>
+  </table></div>
+  <p>
+    쓰는 흐름은 <strong>“A키로 간다 → 화면으로 내용을 본다 → C2✓”</strong>다.
+    사람이 직접 보고 있는 것이 곧 확인 절차이므로 별도 확인 단계가 없다.
+    대상 선택 규칙도, 화면 밖 pane에 승인이 나갈 위험도 <strong>존재하지 않게 된다.</strong>
+  </p>
+  <p>
+    보내는 내용은 Claude Code 권한 프롬프트의 응답 키다.
+    <strong>구체적인 키 전송 방식은 미검증</strong>이며 구현 전 확인한다(<a href="#ver">12</a>).
+  </p>
+</section>
+
+<!-- 05 -->
+<section id="glow">
+  <h2><span class="num">05</span> 테두리</h2>
+  <p class="sub">규칙은 하나 — <strong>지금 6키에 안 보이는 것 중 나를 기다리는 것</strong>을 알린다.</p>
+
+  <div class="tw"><table>
+    <thead><tr><th style="width:12rem">보고 있는 곳</th><th>집계 대상</th></tr></thead>
+    <tbody>
+      <tr><td>iTerm2</td><td><strong>다른 탭들 + 현재 탭에서 6키에 못 올라간 pane</strong></td></tr>
+      <tr><td>Codex</td><td>모든 Claude Code — 전부 화면 밖이므로</td></tr>
+      <tr><td>그 외</td><td>직전 소유권 기준</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>
+    집계 결과가 <code>waiting</code>이면 주황, <code>error</code>면 빨강, 그 외에는 끈다.
+    둘 다 있으면 <strong>탭 뷰와 같은 우선순위</strong>(<code>waiting &gt; error &gt; done &gt; working &gt; idle</code>)를 따른다.
+    <code>done</code>·<code>working</code>·<code>idle</code>을 끄는 이유는 켜두면 테두리가 항상 켜져 신호가 죽기 때문이다.
+  </p>
+
+  <div class="callout">
+    <span class="label">7번째 pane이 사라지지 않게</span>
+    <p>
+      집계 대상에 <strong>“현재 탭에서 6키에 못 올라간 pane”을 포함</strong>하는 것이 핵심이다.
+      단순히 “다른 탭들”로 정의하면 현재 탭의 7번째 pane이 <strong>6키에도 테두리에도 없어
+      완전히 사라진다</strong> — 안전망이 하필 그 케이스에서만 작동하지 않는다.
+    </p>
+  </div>
+
+  <p>
+    테두리는 <strong>탭 뷰로 가는 신호</strong>이기도 하다 — 주황이 뜨면 MOD로 어느 탭인지 확인하고
+    <code>MOD+A<sub>n</sub></code>으로 건너간다.
+  </p>
+
+  <h4>모드</h4>
+  <div class="tw"><table>
+    <thead><tr><th style="width:11rem">mode</th><th>보여주는 것</th></tr></thead>
+    <tbody>
+      <tr><td><code>outside</code> <span class="chip idle">기본</span></td><td>6키에 안 보이는 것 전부 (위 규칙)</td></tr>
+      <tr><td><code>all_claude</code></td><td>모든 Claude Code 세션</td></tr>
+      <tr><td><code>current_tab</code></td><td>현재 탭만. <strong>원칙의 예외</strong> — 6키와 겹치며 테두리의 의미가 “화면 밖”에서 “화면 안”으로 바뀐다. 멀리서 볼 때만 유용</td></tr>
+      <tr><td><code>off</code></td><td>끄기</td></tr>
+    </tbody>
+  </table></div>
+  <p>
+    <code>keep</code>(직전 유지)은 <strong><code>when_other</code>에서만</strong> 쓸 수 있다 —
+    다른 자리에 쓰면 참조할 직전이 없어 정의가 순환한다.
+    <code>layer</code> 모드는 두지 않는다: 표시할 가치가 있는 유일한 순간(Layer 1이 아닐 때)에
+    데몬이 아무것도 쓰지 않으므로 항상 “Layer 1”만 표시하는 상수가 된다.
+  </p>
+</section>
+
+<!-- 06 -->
+<section id="state">
+  <h2><span class="num">06</span> 상태 — 훅과 저장</h2>
+
+  <h3>pane 발견은 iTerm2, 상태는 훅</h3>
+  <p>
+    <strong>Claude Code가 떠 있는 pane인지</strong>는 iTerm2의 <code>jobName</code>으로 안다
+    (버전 문자열 형태로 나온다). 훅은 <em>상태</em>에만 필요하다.
+  </p>
+  <p>
+    덕분에 훅이 아직 안 붙은 세션도 “Claude Code는 있으나 상태 미상”으로 표시할 수 있다.
+    다만 이 판별은 <strong>버전 문자열 표기에 의존</strong>하므로 Claude Code 업데이트로 깨질 수 있다 —
+    깨지면 그 pane은 “Claude Code 없음”으로 보이고, 훅이 붙어 있으면 상태로 보정된다.
+  </p>
+
+  <h3>훅 → 상태 매핑 <span class="chip warn">미검증</span></h3>
+  <p>R1의 근거이며 <strong>설계 전체가 여기 걸려 있다.</strong> 구현 착수 전 첫 번째로 확인한다.</p>
+  <div class="tw"><table>
+    <thead><tr><th style="width:14rem">훅 이벤트</th><th style="width:8rem">상태</th><th>비고</th></tr></thead>
+    <tbody>
+      <tr><td><code>SessionStart</code></td><td><code>idle</code></td><td>세션 등록</td></tr>
+      <tr><td><code>UserPromptSubmit</code></td><td><code>working</code></td><td></td></tr>
+      <tr><td><code>PreToolUse</code> / <code>PostToolUse</code></td><td><code>working</code></td><td></td></tr>
+      <tr><td><code>PreCompact</code></td><td><code>working</code></td><td>긴 유예</td></tr>
+      <tr><td><strong><code>Notification</code></strong></td><td><strong><code>waiting</code></strong></td>
+          <td><strong>승인 대기의 유일한 트리거.</strong> 권한 프롬프트인지 판별하는 방법이 미확인 —
+              페이로드에 구분자가 없으면 승인 기능이 성립하지 않는다</td></tr>
+      <tr><td><code>Stop</code></td><td><code>done</code> 또는 <code>error</code></td>
+          <td><strong><code>error</code>를 어떻게 구분하는지 미확인.</strong> 구분 불가하면 <code>error</code> 상태를 팔레트에서 뺀다</td></tr>
+      <tr><td><code>SessionEnd</code></td><td>레코드 삭제</td><td></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>저장</h3>
+<pre class="flow">~/.paneglow/
+  config.json               <b>설정</b>
+  state/&lt;session&gt;.json      <b>훅이 쓰고 데몬이 읽는다</b>
+  logs/daemon.log
+
+{ "session_id":"…", "tty":"/dev/ttys002", "cwd":"…",
+  "state":"waiting", "rev":42, "updated_at":1784967178.97, "pid":64958 }</pre>
+
+  <p>
+    파일을 쓰는 이유는 <strong>크래시에 강하고</strong>(데몬이 죽어도 상태가 남는다),
+    <strong>순서 의존이 없고</strong>, <strong><code>cat</code>으로 들여다볼 수 있어서</strong>다.
+  </p>
+
+  <div class="callout warn">
+    <span class="label">쓰기는 원자적으로</span>
+    <ul>
+      <li>임시 파일 → <code>fsync</code> → <strong>같은 디렉터리로 <code>rename</code></strong></li>
+      <li><code>rev</code>(단조 증가)를 두고 <strong>더 낮은 <code>rev</code>는 무시</strong></li>
+      <li>읽는 쪽은 파싱 실패를 정상으로 보고 다음 틱에 다시 읽는다</li>
+    </ul>
+  </div>
+
+  <h4>세션 생존 판정</h4>
+  <p>
+    <strong>TTL만으로는 “오래 대기 중”과 “종료됨”을 구분할 수 없다.</strong>
+    훅은 상태가 바뀔 때만 오므로 30분째 승인을 기다리는 세션과 죽은 세션이 똑같이 조용하다.
+  </p>
+  <ul>
+    <li><strong>iTerm2에 그 <code>tty</code>가 없으면 죽은 것</strong> — 있으면 아무리 조용해도 살아 있다</li>
+    <li>같은 <code>tty</code>에 레코드가 둘 이상이면 <strong><code>updated_at</code> 최신만 채택하고 나머지는 즉시 삭제</strong>.
+        한 pane에서 Claude Code를 껐다 켜면 실제로 생기며, 옛 레코드가 <code>waiting</code>이면
+        죽은 세션으로 승인을 보내려 할 수 있다</li>
+    <li>TTL(기본 <code>30분</code>)은 iTerm2 조회가 실패할 때의 안전망일 뿐이다</li>
+  </ul>
+</section>
+
+<!-- 07 -->
+<section id="gen">
+  <h2><span class="num">07</span> 세대와 입력 안전</h2>
+  <p class="sub">보이는 것과 눌렀을 때 가는 곳이 어긋나지 않게 묶는다.</p>
+
+  <p>
+    LED 갱신이 실패했는데 입력을 계속 받으면 <strong>화면은 옛 배치인데 키는 새 배치로
+    라우팅된다.</strong> 잘못된 pane으로 가고, 그 위에 승인 키가 올라간다.
+  </p>
+
+<pre class="flow">generation N = { panes[], colors[], layer, owner }
+
+  LED 쓰기 성공 + device.status 왕복 성공  →  세대 N 확정, 입력은 N 의 panes[] 로
+  둘 중 하나라도 실패                      →  세대 N 폐기, <b>입력 잠금</b> (fail-closed)</pre>
+
+  <p>
+    입력이 잠긴 동안 A키를 눌러도 아무 일도 없다.
+    <strong>엉뚱한 pane으로 가느니 아무 데도 안 가는 편이 낫다.</strong>
+  </p>
+  <p>
+    pane 구성이 바뀌면(split 생성·종료) 새 세대로 교체하며, 교체가 끝날 때까지 입력을 잠근다.
+    여러 A키의 대상이 한꺼번에 이동하는 순간이므로 짧더라도 반드시 잠근다.
+  </p>
+
+  <h3>목표 지연</h3>
+  <div class="tw"><table>
+    <thead><tr><th style="width:19rem">경로</th><th>목표</th></tr></thead>
+    <tbody>
+      <tr><td>상태 변화 → LED 반영</td><td>500ms 이내</td></tr>
+      <tr><td>A키 press → pane 이동</td><td>150ms 이내</td></tr>
+      <tr><td>데몬 상태 폴링</td><td>250ms</td></tr>
+      <tr><td>frontmost 감지</td><td>알림 기반(폴백 1초)</td></tr>
+    </tbody>
+  </table></div>
+  <p>
+    pane 15개 병렬에서 훅 호출이 몰릴 때 이 목표를 지키는지는 미검증이다.
+    못 지키면 폴링 간격을 늘리고 LED 갱신을 합친다.
+  </p>
+</section>
+
+<!-- 08 -->
+<section id="mod">
+  <h2><span class="num">08</span> 모듈과 흐름</h2>
+
+  <div class="tw"><table>
+    <thead><tr><th style="width:7rem">모듈</th><th>책임</th><th style="width:8rem">의존</th><th style="width:10rem">테스트</th></tr></thead>
+    <tbody>
+      <tr><td><code>hooks</code></td><td>훅 수신 → 상태 원자적 저장</td><td>없음</td><td>가짜 이벤트</td></tr>
+      <tr><td><code>iterm</code></td><td>탭·pane 트리, <code>jobName</code>, pane 포커스</td><td><code>iterm2</code></td><td>실제 iTerm2</td></tr>
+      <tr><td><code>pad</code></td><td>벤더 채널 · <code>v.oai.*</code> 송수신</td><td>IOKit</td><td>하드웨어</td></tr>
+      <tr><td><code>render</code></td><td>(pane + jobName + 상태 + 뷰) → 색 배열</td><td>없음</td><td><strong>순수 함수</strong></td></tr>
+      <tr><td><code>daemon</code></td><td>두 게이트 · 세대 · MOD 상태</td><td>넷 다</td><td>목킹</td></tr>
+    </tbody>
+  </table></div>
+
+<pre class="flow">Claude Code 훅 ──► state/&lt;session&gt;.json  (tty, state, rev)
+                              │
+iTerm2 API ──► pane 트리 + jobName ──┤
+                              ▼
+layer_index ──► <b>[레이어 게이트]</b> ─┐
+frontmost   ──► <b>[소유권 게이트]</b> ─┴─► render() ──► thstatus / rgbcfg
+                              │                         │
+v.oai.hid (키) ──► MOD 상태 ──┴──► <b>[세대 확정?]</b> ──► iTerm2 select session</pre>
+
+  <p>
+    <code>render</code>가 순수 함수인 것이 중요하다 — 로직 대부분이 하드웨어 없이 테스트된다.
+    권한과 실물을 요구하는 것은 <code>pad</code>뿐이다.
+  </p>
+</section>
+
+<!-- 09 -->
+<section id="err">
+  <h2><span class="num">09</span> 경계 조건과 실패</h2>
+  <p class="sub">전부 fail-closed. 엉뚱한 곳에 보내느니 아무것도 하지 않는다.</p>
+
+  <div class="tw"><table>
+    <thead><tr><th style="width:16rem">상황</th><th>동작</th></tr></thead>
+    <tbody>
+      <tr><td><code>layer_index != 1</code></td><td>6키·입력 포기. 테두리는 설정에 따라 유지</td></tr>
+      <tr><td>게이트가 벤더 소유</td><td>6키 소등 후 양보, <strong>입력 처리 안 함</strong></td></tr>
+      <tr><td>pane 6개 미만</td><td>남는 키 소등</td></tr>
+      <tr><td><strong>pane 7개 이상</strong></td><td>앞 6개를 6키에. <strong>나머지는 테두리 집계에 포함</strong></td></tr>
+      <tr><td><strong>탭 7개 이상</strong></td><td>탭 뷰는 6개까지. 초과분은 <strong>노브로만 도달</strong> — 노브를 끄면 도달 불가하므로 설정 시 경고</td></tr>
+      <tr><td><strong>iTerm2 창 여러 개</strong></td><td><strong>가장 최근 활성 창 1개</strong>만 다룬다. 다른 창은 집계에서 제외</td></tr>
+      <tr><td>Claude Code 없는 pane</td><td>소등. 키를 누르면 <strong>이동은 됨</strong></td></tr>
+      <tr><td>tty를 못 알아냄</td><td>아무것도 안 함</td></tr>
+      <tr><td>패드 미연결</td><td>재시도. 상태 수집은 계속. <strong>재연결 시 전체 재도색</strong></td></tr>
+      <tr><td><code>thstatus</code> 실패</td><td>세대 폐기 → <strong>입력도 잠금</strong></td></tr>
+      <tr><td>iTerm2 미실행</td><td>키 no-op. <strong>앱을 실행시키지 않는다</strong></td></tr>
+      <tr><td>iTerm2 재시작 / API 끊김</td><td>매핑 전부 폐기 후 재구축. tty 재사용에 옛 상태를 붙이지 않는다</td></tr>
+      <tr><td>macOS 절전 → 복귀</td><td>HID·API·타이머 재수립, 전체 재도색, 경과 시간만큼 TTL 재계산</td></tr>
+      <tr><td>레이어가 도중에 바뀜</td><td>쓰기 직전 재확인(TOCTOU). 어긋나면 그 프레임 폐기</td></tr>
+      <tr><td><strong>데몬 종료</strong></td><td><strong>6키·테두리를 끄고 나간다</strong> — 낡은 색이 굳어 사용자가 오독하지 않도록</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>“왜 안 켜지지?”에 답할 수단</h3>
+  <p>
+    키가 어두운 이유는 여럿인데 <strong>눈에는 전부 똑같이 보인다.</strong>
+    로그를 열어보게 하는 것은 답이 아니다.
+  </p>
+  <div class="tw"><table>
+    <thead><tr><th style="width:14rem">수단</th><th>알려주는 것</th></tr></thead>
+    <tbody>
+      <tr><td><code>paneglow status</code></td>
+          <td>데몬 생존, 권한 상태, 패드 연결·전송, 현재 레이어, 소유권, 세대,
+              각 키의 배정과 <strong>왜 어두운지</strong></td></tr>
+      <tr><td><code>paneglow doctor</code></td>
+          <td>설치 점검 — Input Monitoring, iTerm2 Python API 활성화, 훅 설치, 패드 왕복</td></tr>
+      <tr><td>장애 표시</td>
+          <td>데몬은 살아 있으나 정상 동작 못 할 때 <strong>테두리 느린 깜빡임</strong> — “꺼짐”과 “고장”을 구분</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>버전 호환성</h3>
+  <p>
+    하드웨어 사실은 모두 <strong>firmware v0.4.1</strong>에서 나왔다.
+    기동 시 <code>device.status</code>로 버전을 읽어 <strong>다르면 경고하고 계속 진행</strong>한다(거부하지 않는다).
+    <code>iterm2</code> 패키지와 Claude Code 훅 스키마도 최소 버전을 기록하고, 어긋나면 <code>doctor</code>가 알린다.
+  </p>
+</section>
+
+<!-- 10 -->
+<section id="cfg">
+  <h2><span class="num">10</span> 설정</h2>
+  <p class="sub"><code>~/.paneglow/config.json</code> — 전체 스키마와 기본값. 전부 선택이며 없으면 기본값을 쓴다.</p>
+
+<pre class="flow">{
+  <b>"gate"</b>: {
+    "mode":      "frontmost",                <b>// frontmost | always | off</b>
+    "yield_to":  ["com.openai.chat"],        <b>// bundle id</b>
+    "own_when":  ["com.googlecode.iterm2"],
+    "otherwise": "keep"
+  },
+  <b>"layer_gate"</b>: { "keys": "off", "underglow": "keep" },
+
+  <b>"mod_key"</b>: "C7",                          <b>// C1~C4, C7, KNOB_PRESS  (C5·C6 불가)</b>
+  <b>"tab_switch"</b>: { "knob": true, "mod_direct": true },   <b>// R7 — 각각 끌 수 있다</b>
+  <b>"double_tap"</b>: { "enabled": true, "window_ms": 300 },
+
+  <b>"approve"</b>: { "enabled": true },           <b>// C2/C3</b>
+
+  <b>"underglow"</b>: {
+    "when_iterm": { "mode": "outside"    },
+    "when_codex": { "mode": "all_claude" },
+    "when_other": { "mode": "keep"       },  <b>// keep 은 여기서만</b>
+    "colors": { "waiting": "#FF6D00", "error": "#FF0033", "quiet": "off" }
+  },
+
+  <b>"state"</b>: { "ttl_minutes": 30, "done_fade_seconds": 180 },
+  <b>"timing"</b>: { "poll_ms": 250, "mod_release_timeout_ms": 5000 },
+
+  <b>"experimental"</b>: { "codex_status": { "enabled": false, "source": "ipc" } }
+}</pre>
+
+  <div class="tw"><table>
+    <thead><tr><th style="width:11rem">키</th><th>비고</th></tr></thead>
+    <tbody>
+      <tr><td><code>gate.mode</code></td>
+          <td><code>frontmost</code> 게이트 사용 · <code>always</code> 항상 우리 소유(ChatGPT 앱을 꺼야 함) ·
+              <strong><code>off</code>는 paneglow 전체 비활성</strong>(패드를 건드리지 않음)</td></tr>
+      <tr><td><code>state.done_fade_seconds</code></td>
+          <td><strong>우리 설계 결정</strong>이다 — 공장의 “읽지 않음” 의미를 참고했을 뿐 하드웨어 동작이 아니다</td></tr>
+      <tr><td>설정 오류</td>
+          <td>해당 키만 기본값으로 폴백하고 <code>doctor</code>에 경고를 남긴다. 기동을 거부하지 않는다</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- 11 -->
+<section id="ops">
+  <h2><span class="num">11</span> 운용과 설치</h2>
+
+  <h3>필요한 것</h3>
+  <div class="tw"><table>
+    <thead><tr><th style="width:15rem">항목</th><th>용도</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Input Monitoring</strong></td><td>벤더 채널 — 6키 LED와 키 입력. 데몬 바이너리에 부여</td></tr>
+      <tr><td>iTerm2 <strong>Python API 활성화</strong></td><td>pane 트리·포커스. 유닉스 소켓이라 TCC 불필요</td></tr>
+      <tr><td>Claude Code 훅</td><td>상태 수집. 설치 후 <strong>기존 세션은 재시작</strong>해야 붙는다</td></tr>
+      <tr><td>Accessibility</td><td><strong>불필요</strong> — 키를 합성하지 않는다</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="tw"><table>
+    <thead><tr><th style="width:11rem">언제</th><th>무엇을</th></tr></thead>
+    <tbody>
+      <tr><td><strong>설정</strong> — 가끔</td><td>USB 연결 → Work Louder Input 실행 → 레이어 키맵·LED 설정 → <strong>앱 종료</strong></td></tr>
+      <tr><td><strong>평소</strong></td><td>Input 앱 꺼짐 · Layer 1 · 데몬 실행 · <strong>ChatGPT 앱은 켜둬도 된다</strong></td></tr>
+      <tr><td><strong>Codex 쓸 때</strong></td><td>그냥 전환하면 된다 — 게이트가 6키를 양보한다</td></tr>
+      <tr><td><strong>끄고 싶을 때</strong></td><td><code>paneglow stop</code> 또는 <code>gate.mode: "off"</code>.
+          <strong>레이어를 돌려서 끄지 말 것</strong> — 커스텀 레이어를 훑고 지나간다</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>
+    데몬은 <strong>launchd LaunchAgent</strong>로 로그인 시 기동한다.
+    <code>paneglow start</code> / <code>stop</code> / <code>status</code> / <code>doctor</code>로 다룬다.
+  </p>
+  <p>
+    Work Louder Input 앱을 상주시키지 않는 이유는 <code>host.focused_app</code>을 1초마다 덮어쓰고,
+    벤더가 경고한 Karabiner·Logi Options+ 간섭 대상이기 때문이다.
+  </p>
+</section>
+
+<!-- 12 -->
+<section id="ver">
+  <h2><span class="num">12</span> 검증 현황</h2>
+  <p class="sub">
+    실측 항목의 전체 목록과 방법은 <a href="hardware-notes.md">하드웨어 노트</a>에 있다.
+    여기서는 <strong>설계가 걸려 있는 것</strong>만 추린다.
+  </p>
+
+  <h3>확인됨</h3>
+  <div class="tw"><table>
+    <thead><tr><th>항목</th><th style="width:7rem"></th></tr></thead>
+    <tbody>
+      <tr><td>Layer 1 — A키·C키·노브 벤더 이벤트 (press/release 분리)</td><td><span class="chip ok">실측</span></td></tr>
+      <tr><td><strong>MOD 코드</strong> — <code>ACT12</code>+<code>AG00</code>~<code>AG05</code> 6조합, 3개 동시까지</td><td><span class="chip ok">실측</span></td></tr>
+      <tr><td>Layer 1 — A1~A6 개별 색 / Layer 2+ 무효 (재현)</td><td><span class="chip ok">실측</span></td></tr>
+      <tr><td>세 존 독립 (thstatus / keys / ambient)</td><td><span class="chip ok">실측</span></td></tr>
+      <tr><td><code>layer_index</code> 실시간 반영 (1-indexed)</td><td><span class="chip ok">실측</span></td></tr>
+      <tr><td>iTerm2 — 분할 트리, tty·cwd·jobName, <strong>백그라운드 pane 선택</strong></td><td><span class="chip ok">실측</span></td></tr>
+      <tr><td>Input 앱 실행 중에도 벤더 채널 open</td><td><span class="chip ok">실측</span></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>미검증 — 구현 착수 전 관문</h3>
+  <div class="tw"><table>
+    <thead><tr><th>항목</th><th style="width:17rem">실패 시</th></tr></thead>
+    <tbody>
+      <tr><td><strong>훅 → 상태 매핑</strong> — 특히 <code>waiting</code> 판별과 <code>error</code> 구분</td>
+          <td><strong>R1 전체가 무너진다.</strong> <code>waiting</code> 불가면 승인 기능도 제거</td></tr>
+      <tr><td><strong>pane에 키 전송</strong> — 승인/거절의 실제 수단</td>
+          <td>승인 기능 제거. 표시와 이동만</td></tr>
+      <tr><td>분할 트리 <code>vertical</code> 방향 (좌우인지 상하인지)</td>
+          <td>순서가 뒤집히면 A키가 다른 pane으로 간다. <strong>실측 한 번</strong></td></tr>
+      <tr><td>벤더가 언제 6키를 다시 그리는가</td>
+          <td>양보 후 잔상 처리·재도색 시점 재설계</td></tr>
+      <tr><td>테두리가 <strong>벤더가 그리는 중에도</strong> 유지되는가</td>
+          <td>60초 관찰은 했으나 그동안 벤더가 그렸는지 미확인. 실패 시 R5 축소</td></tr>
+      <tr><td>Karabiner·Logi Options+ 간섭</td><td>벤더 공식 경고 항목. 증상 시 원인 1순위</td></tr>
+      <tr><td>pane 15개 병렬에서 목표 지연 달성</td><td>폴링 간격·LED 갱신 병합</td></tr>
+      <tr><td>절전 복귀·재연결 후 LED 복원</td><td>재도색 트리거 보강</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- 13 -->
+<section id="out">
+  <h2><span class="num">13</span> 범위 밖</h2>
+  <ul>
+    <li><strong>Codex CLI</strong> — 훅 시스템이 없어 상태 소스를 새로 만들어야 한다</li>
+    <li><strong>Codex 스레드 상태 표시</strong> — 경로는 찾았으나(하드웨어 노트 §5) 비공개 API라
+        <code>experimental.codex_status</code>로 격리, 기본 비활성</li>
+    <li><strong>Layer 2+ 키맵 관리</strong> — Work Louder Input의 영역</li>
+    <li><strong>iTerm2 창 2개 이상 동시 관리</strong> — 가장 최근 활성 창 하나만</li>
+    <li><strong>메뉴바 UI</strong> — CLI가 안정된 뒤 껍데기로</li>
+  </ul>
+</section>
+
+<hr>
+<footer>
+  paneglow 설계 · 2026-07-25 · 하드웨어 사실은 <a href="hardware-notes.md">별도 노트</a>로 분리
+</footer>
+
+</main>
+</div>
