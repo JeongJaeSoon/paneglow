@@ -1366,7 +1366,9 @@ Phase 1의 마지막이자 **처음으로 하드웨어가 실제로 빛나는 �
 >    하나뿐이고 그 주 usage는 **키보드**(`usage_page=0x0001 usage=0x0006`)다.
 >    `0xFF00`은 그 안의 하위 컬렉션이라 주 usage로는 안 잡힌다.
 >
-> `device.status` 왕복과 `v.oai.thstatus` 점등을 실기에서 확인했다.
+> `device.status` 왕복과 `v.oai.thstatus` 점등을 **USB·BLE 양쪽에서** 확인했다.
+> 전송 판별은 IOKit `Transport` 속성으로 한다 — `"USB"`가 들어 있으면 USB,
+> 아니면 BLE. 따라서 `Pad.transport`는 설정값이 아니라 **기기에서 읽는다.**
 > 근거와 실측 로그는 [`docs/hardware-notes.md`](../../hardware-notes.md) §4.
 
 **Files:**

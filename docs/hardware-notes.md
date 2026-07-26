@@ -153,6 +153,41 @@ matched 1 IOHIDDevice(s) for 0x303a/0x8360
       "battery":100,"is_charging":false},"id":42,"method":"device.status"}
 ```
 
+### 전송 판별 — `Transport` 속성을 쓴다
+
+프레이밍이 전송별로 다르고 틀리면 조용히 버려지므로 판별이 필요하다.
+IOKit의 `Transport` 속성이 신뢰할 수 있는 신호다. **양쪽 다 실측했다.**
+
+| 연결 | `Transport` | 프레이밍 | 왕복 | 점등 |
+|---|---|---|---|---|
+| 유선 | `USB` (추정) | `[0x02][len][json]` 63B | ✅ | ✅ |
+| 무선 | `Bluetooth Low Energy` | `[0x06][0x02][len][json]` 64B | ✅ | ✅ |
+
+```console
+Transport              Bluetooth Low Energy
+Manufacturer           Work Louder
+Product                Codex Micro #1
+PrimaryUsagePage       0x0001 (1)
+PrimaryUsage           0x0006 (6)
+MaxOutputReportSize    0x0040 (64)
+MaxInputReportSize     0x0040 (64)
+
+Transport says 'Bluetooth Low Energy' -> try BLE first
+  BLE: 1 packet(s) x 64 bytes
+  -> REPLY  fw=v0.4.1 layer=1 battery=98
+```
+
+`"USB"`가 들어 있으면 USB, 아니면 BLE로 고르면 된다. 사용자가 유선↔무선을
+오가도 자동으로 맞는다.
+
+> **더 나은 신호일 가능성** (미확인): `MaxOutputReportSize`가 BLE에서 **64**로
+> 나왔다. USB에서 **63**이면 전송 이름을 볼 필요 없이 이 숫자를 프레임 크기로
+> 그대로 쓸 수 있다. 문자열 매칭보다 안전하다. **USB에서 이 값을 재보지 않았다** —
+> 다음에 유선 연결할 때 확인할 것.
+
+BLE로 전환은 터치 센서 3초 홀드 후 탭(§1). 무선일 때는 배터리 값이 100 미만으로
+내려간다(98 관측) — 유선일 때는 충전 중이라 100이었다.
+
 ### 주요 메서드
 
 | 메서드 | 내용 | 등급 |
