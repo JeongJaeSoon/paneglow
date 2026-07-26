@@ -2,6 +2,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 from paneglow.state import AgentState
 from paneglow.store import SessionRecord, write, read_all, by_tty, prune
 
@@ -39,6 +41,28 @@ def test_no_partial_file_left_behind(tmp_path: Path):
     write(rec(), tmp_path)
     assert list(tmp_path.glob("*.tmp")) == []
     assert [p.name for p in tmp_path.glob("*.json")] == ["s1.json"]
+
+
+@pytest.mark.parametrize("session_id", [
+    "../escaped", "a/b", "..", ".", "", "x\x00y", "sub/../../out",
+])
+def test_session_id_cannot_escape_the_store(tmp_path: Path, session_id):
+    """session_id comes from a hook's stdin JSON and lands in os.replace() and
+    unlink(). '../escaped' used to write a file outside the store."""
+    root = tmp_path / "state"
+    root.mkdir()
+    with pytest.raises(ValueError):
+        write(rec(sid=session_id), root)
+    assert list(tmp_path.glob("*.json")) == []
+
+
+def test_a_record_that_renames_itself_is_ignored(tmp_path: Path):
+    """The filename is safe, but session_id inside the file need not be."""
+    write(rec(sid="ok"), tmp_path)
+    payload = json.loads((tmp_path / "ok.json").read_text())
+    payload["session_id"] = "../escaped"
+    (tmp_path / "ok.json").write_text(json.dumps(payload))
+    assert read_all(tmp_path) == []
 
 
 def test_by_tty_keeps_newest(tmp_path: Path):

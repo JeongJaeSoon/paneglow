@@ -40,13 +40,27 @@ class SessionRecord:
     pid: int
 
 
+def _checked_id(session_id: str) -> str:
+    """Refuse anything that would not stay a single file inside the store.
+
+    session_id arrives in a hook's stdin JSON and ends up in os.replace() and
+    unlink(). Claude Code sends a uuid, but a field read off stdin becoming a
+    filesystem path is a trust boundary: '../escaped' writes outside the store.
+    """
+    if not session_id or session_id in (".", "..") or "/" in session_id \
+            or "\\" in session_id or "\x00" in session_id:
+        raise ValueError(f"unusable session_id: {session_id!r}")
+    return session_id
+
+
 def _path(root: Path, session_id: str) -> Path:
-    return root / f"{session_id}.json"
+    return root / f"{_checked_id(session_id)}.json"
 
 
 def _load(path: Path) -> SessionRecord | None:
     try:
         raw = json.loads(path.read_text())
+        _checked_id(str(raw["session_id"]))   # a file may name itself anything
         return SessionRecord(
             session_id=raw["session_id"], tty=raw["tty"], cwd=raw["cwd"],
             state=AgentState(raw["state"]), rev=int(raw["rev"]),
@@ -124,16 +138,23 @@ def prune(root: Path, live_ttys: set[str] | None,
     A record also dies when a newer one has taken over its tty. Liveness of the
     tty string alone would keep the old one forever: the pty gets recycled for
     the next pane, so the tty stays live while the session behind it is gone.
-    """
-    records = read_all(root)
-    current = {r.session_id for r in by_tty(records).values()}
 
-    removed = 0
-    for rec in records:
-        superseded = rec.session_id not in current
-        dead = superseded or ((rec.tty not in live_ttys) if live_ttys is not None
-                              else (now - rec.updated_at > ttl_seconds))
-        if dead:
-            _path(root, rec.session_id).unlink(missing_ok=True)
-            removed += 1
+    Runs under the write lock: otherwise a hook can replace a record between the
+    read and the unlink, and the brand new state gets deleted.
+    """
+    if not root.exists():
+        return 0
+
+    with _write_lock(root):
+        records = read_all(root)
+        current = {r.session_id for r in by_tty(records).values()}
+
+        removed = 0
+        for rec in records:
+            superseded = rec.session_id not in current
+            dead = superseded or ((rec.tty not in live_ttys) if live_ttys is not None
+                                  else (now - rec.updated_at > ttl_seconds))
+            if dead:
+                _path(root, rec.session_id).unlink(missing_ok=True)
+                removed += 1
     return removed
