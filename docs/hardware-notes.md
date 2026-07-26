@@ -18,7 +18,7 @@
 
 ## 1. 물리 배치와 명칭
 
-```
+```text
 행 1    ◯ 노브        [A1] [A2]        ● 조이스틱
 행 2    [A3]  [A4]   [A5]  [A6]
 행 3    [C1⚡] [C2✓]  [C3✗] [C4⤳]
@@ -98,7 +98,7 @@ Work Louder Input 앱의 Layer 2 설정에 Backlight/Underglow 두 존만 있는
 
 ### 공장 상태색 (벤더 문서)
 
-```
+```text
 idle #FFFFFF · working #304FFE · waiting #FF6D00 · done #00FF4C · error #FF0033 · 없음 off
 ```
 
@@ -135,7 +135,7 @@ idle #FFFFFF · working #304FFE · waiting #FF6D00 · done #00FF4C · error #FF0
 **기기 식별에 `PrimaryUsagePage == 0xFF00`을 쓰면 안 된다.** macOS가 내주는
 IOHIDDevice는 **하나뿐**이고 그 주 usage는 키보드다:
 
-```
+```text
 usage_page=0x0001  usage=0x0006     ← Generic Desktop / Keyboard
 ```
 
@@ -144,7 +144,7 @@ usage_page=0x0001  usage=0x0006     ← Generic Desktop / Keyboard
 
 실측 왕복 (권한 없는 인터프리터):
 
-```
+```console
 IOServiceGetMatchingServices -> success
 matched 1 IOHIDDevice(s) for 0x303a/0x8360
   usage_page=0x0001 usage=0x0006  open -> success
@@ -219,7 +219,16 @@ ChatGPT 앱이 상태를 받아오는 경로. 우리도 붙을 수 있을지 모
 | Python API로 분할 트리 순회 | ✅ (`Splitter vertical=… children=N`) |
 | pane별 `tty`·`cwd`·`jobName` | ✅ |
 | **백그라운드 pane 선택** | ✅ `async_activate(select_tab=False, order_window_front=False)` — Finder를 앞에 둔 채 pane만 이동, iTerm2 창은 올라오지 않음 |
-| 분할 트리 `vertical` 플래그 방향 | ❌ 미확인 (좌우인지 상하인지) |
+| 분할 트리 `vertical` 플래그 방향 | ✅ `vertical=True` = **좌우** 배치 (구분선이 세로) |
+| pane 절대 좌표 API | ❌ 없다. `Session`에 `frame`·`origin` 없음(2.20). `grid_size`(셀 수)만 있다 |
+
+> **iTerm2는 열을 먼저 묶는다.** 2x2 탭의 트리는 `Splitter(vertical=True)[좌열, 우열]`이라
+> 깊이 우선으로 훑으면 **좌상·좌하·우상·우하**가 나온다. 사람이 읽는 순서
+> (좌상·우상·좌하·우하)와 다르므로 좌표를 계산해 `(y, x)`로 정렬해야 한다.
+>
+> 게다가 구분선을 드래그하면 열마다 나뉘는 높이가 달라져 **균등 분할 가정으로는 순서가
+> 뒤바뀐다.** 실측: 왼쪽을 69/23으로, 오른쪽을 46/46으로 나누면 우하 pane이 좌하보다
+> 위에 온다. `grid_size`(셀 수)로 가중해야 맞는다.
 
 > **`jobName`으로 Claude Code pane을 식별할 수 있다** — 버전 문자열(`2.1.220` 형태)로 나온다.
 > 단 이 표기에 의존하므로 Claude Code 업데이트로 깨질 수 있다.
