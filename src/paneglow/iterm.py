@@ -1,7 +1,8 @@
-"""iTerm2 어댑터.
+"""iTerm2 adapter.
 
-pane 발견은 iTerm2 가 한다 — jobName 으로 Claude Code 가 떠 있는지 알 수 있어서
-훅이 아직 안 붙은 세션도 자리를 차지한다. 훅은 '상태' 에만 필요하다.
+iTerm2 does the discovering -- jobName tells us Claude Code is running, so a
+session whose hook is not installed yet still occupies a key. Hooks are only
+needed for the *state*.
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from typing import Any
 
 from paneglow.render import Pane
 
-#: Claude Code 는 jobName 이 버전 문자열로 나온다. 이 표기가 바뀌면 판별이 깨진다.
+#: Claude Code reports its version string as jobName. If that changes, this breaks.
 _VERSION = re.compile(r"^\d+\.\d+\.\d+")
 
 
@@ -18,34 +19,67 @@ def is_claude_job(job_name: str | None) -> bool:
     return bool(job_name) and bool(_VERSION.match(job_name))
 
 
+def _extent(node: Any, leaf: type, horizontal: bool) -> int:
+    """Size of a subtree in character cells, along one axis."""
+    if isinstance(node, leaf):
+        grid = node.grid_size
+        return grid.width if horizontal else grid.height
+    children = list(getattr(node, "children", []))
+    if not children:
+        return 0
+    sizes = [_extent(c, leaf, horizontal) for c in children]
+    # Children laid out along this axis add up; across it they overlap.
+    return sum(sizes) if getattr(node, "vertical", True) == horizontal else max(sizes)
+
+
+def _weights(children: list, leaf: type, horizontal: bool) -> list[int]:
+    """Relative sizes for splitting the space. Falls back to equal shares when
+    the tree carries no grid_size (unit tests, or an API that stops exposing it)."""
+    try:
+        sizes = [_extent(c, leaf, horizontal) for c in children]
+    except AttributeError:
+        return [1] * len(children)
+    return sizes if all(s > 0 for s in sizes) else [1] * len(children)
+
+
 def _place(node: Any, leaf: type,
            x: float, y: float, w: float, h: float) -> list[tuple[float, float, Any]]:
-    """분할 트리를 (세로위치, 가로위치, 세션) 목록으로 편다.
+    """Flatten a split tree into (top, left, session) triples.
 
-    깊이 우선 순회만으로는 화면 순서가 나오지 않는다. iTerm2 는 열을 먼저
-    묶기 때문에 2x2 를 훑으면 좌상·좌하·우상·우하 순으로 나오는데, 사람은
-    좌상·우상·좌하·우하로 읽는다. 그래서 좌표를 세어야 한다.
+    A depth-first walk alone does not give on-screen order. iTerm2 groups by
+    column, so walking a 2x2 yields top-left, bottom-left, top-right, bottom-right
+    while a person reads top-left, top-right, bottom-left, bottom-right.
+
+    Splits are weighted by actual cell counts, not assumed even. Sibling columns
+    can be divided at different heights, and then a pane in one column really
+    does sit below a pane in the next -- measured: a left column split 69/23
+    against a right column split 46/46 puts the right-bottom pane above the
+    left-bottom one. Even shares get that pair backwards.
     """
     if isinstance(node, leaf):
         return [(y, x, node)]
     children = list(getattr(node, "children", []))
     if not children:
         return []
-    # ponytail: 분할은 균등하다고 본다. 좌표 API 가 없어 크기는 알 수 없지만,
-    # 순서만 필요하므로 구분선을 옮겨도 결과는 같다.
-    vertical = getattr(node, "vertical", True)   # 구분선이 세로 = 좌우 배치
+
+    vertical = getattr(node, "vertical", True)   # vertical divider = side by side
+    weights = _weights(children, leaf, vertical)
+    total = sum(weights)
+
     out: list[tuple[float, float, Any]] = []
-    step = (w if vertical else h) / len(children)
-    for i, child in enumerate(children):
+    offset = 0.0
+    for child, weight in zip(children, weights):
+        span = (w if vertical else h) * weight / total
         if vertical:
-            out += _place(child, leaf, x + i * step, y, step, h)
+            out += _place(child, leaf, x + offset, y, span, h)
         else:
-            out += _place(child, leaf, x, y + i * step, w, step)
+            out += _place(child, leaf, x, y + offset, w, span)
+        offset += span
     return out
 
 
 def flatten(node: Any, leaf: type) -> list:
-    """분할 트리를 읽기 순서(위→아래, 좌→우)로 편다."""
+    """Flatten a split tree into reading order: top to bottom, left to right."""
     placed = _place(node, leaf, 0.0, 0.0, 1.0, 1.0)
     return [session for _, _, session in sorted(placed, key=lambda t: (t[0], t[1]))]
 
@@ -57,7 +91,7 @@ async def _pane_of(session) -> Pane:
 
 
 def _current_window(app):
-    """가장 최근 활성 창 하나만 다룬다. 다중 창은 범위 밖이다."""
+    """Only the most recently active window. Multiple windows are out of scope."""
     return app.current_terminal_window
 
 
@@ -76,7 +110,7 @@ async def tab_count(app) -> int:
 
 
 async def live_ttys(app) -> set[str]:
-    """지금 살아 있는 pane 의 tty 전부. 세션 생존 판정의 기준이다."""
+    """Every tty currently alive. This is what decides whether a session lives."""
     import iterm2
     out: set[str] = set()
     for window in app.windows:
@@ -89,7 +123,7 @@ async def live_ttys(app) -> set[str]:
 
 
 async def focus_pane(app, tty: str, bring_to_front: bool = False) -> bool:
-    """그 tty 의 pane 을 고른다. 못 찾으면 아무것도 하지 않는다."""
+    """Select the pane on that tty. Does nothing if it is not found."""
     import iterm2
     for window in app.windows:
         for tab in window.tabs:
