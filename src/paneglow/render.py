@@ -1,4 +1,4 @@
-"""무엇을 어떤 색으로 보여줄지 계산한다. 하드웨어도 파일도 모르는 순수 함수."""
+"""Decides what to show and in what colour. Pure -- no hardware, no files."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,7 +8,7 @@ from paneglow.state import AgentState, highest
 
 KEY_COUNT = 6
 
-#: 공장 정품 값. 벤더가 Codex 에 쓰는 색과 같아야 눈이 헷갈리지 않는다.
+#: Factory values. Matching what the vendor uses for Codex keeps the eye honest.
 PALETTE: dict[AgentState, int] = {
     AgentState.IDLE: 0xFFFFFF,
     AgentState.WORKING: 0x304FFE,
@@ -17,7 +17,7 @@ PALETTE: dict[AgentState, int] = {
     AgentState.ERROR: 0xFF0033,
 }
 
-#: 테두리에 띄울 가치가 있는 상태. 나머지는 켜두면 신호가 죽는다.
+#: Worth lighting the border for. Anything else on means the signal is dead.
 _NOTABLE = (AgentState.WAITING, AgentState.ERROR)
 
 
@@ -29,7 +29,7 @@ class Pane:
 
 
 def render_pane_view(panes: list[Pane]) -> list[int | None]:
-    """화면 배치 순서대로 6키 색. None 은 소등."""
+    """Six key colours in on-screen order. None means dark."""
     out: list[int | None] = [None] * KEY_COUNT
     for i, pane in enumerate(panes[:KEY_COUNT]):
         if pane.is_claude and pane.state is not None:
@@ -38,11 +38,13 @@ def render_pane_view(panes: list[Pane]) -> list[int | None]:
 
 
 def overflow(panes: list[Pane]) -> list[Pane]:
-    """6키에 못 올라간 pane. 테두리 집계에 넣어야 사라지지 않는다."""
+    """Panes that did not fit on the six keys. Feed these to the border tally or
+    a seventh pane becomes invisible everywhere."""
     return list(panes[KEY_COUNT:])
 
 
 def underglow_for(states: Iterable[AgentState]) -> int | None:
-    """화면 밖에서 나를 기다리는 것이 있으면 그 색, 없으면 None."""
+    """The colour for something out of sight that wants me -- waiting or errored.
+    None when nothing does."""
     top = highest(states)
     return PALETTE[top] if top in _NOTABLE else None

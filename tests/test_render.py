@@ -20,14 +20,14 @@ def test_empty_slots_are_dark():
 
 
 def test_non_claude_pane_is_dark_but_occupies_a_slot():
-    """키를 누르면 이동은 되어야 하므로 자리는 차지한다."""
+    """It still takes a slot, because pressing the key must still jump there."""
     out = render_pane_view([p(claude=False), p(AgentState.WAITING)])
     assert out[0] is None
     assert out[1] == PALETTE[AgentState.WAITING]
 
 
 def test_claude_without_state_is_dark():
-    """jobName 으로 발견했지만 훅이 아직 안 붙은 pane."""
+    """Found via jobName, but its hook is not installed yet."""
     assert render_pane_view([p(state=None, claude=True)])[0] is None
 
 
@@ -67,6 +67,6 @@ def test_underglow_prefers_waiting_over_error():
 
 
 def test_underglow_is_off_when_quiet():
-    """done/working/idle 은 알릴 가치가 없다 — 켜두면 신호가 죽는다."""
+    """done/working/idle are not worth announcing -- always on kills the signal."""
     assert underglow_for([AgentState.WORKING, AgentState.DONE, AgentState.IDLE]) is None
     assert underglow_for([]) is None
