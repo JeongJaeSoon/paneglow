@@ -1,4 +1,5 @@
-"""설정 로드. 틀린 값은 기본값으로 떨어뜨리고 경고를 모은다 — 기동을 막지 않는다."""
+"""Config loading. Bad values fall back to defaults and collect a warning --
+nothing here may block startup."""
 from __future__ import annotations
 
 import json
@@ -7,7 +8,7 @@ from pathlib import Path
 
 _GATE_MODES = {"frontmost", "always", "off"}
 _UNDERGLOW_MODES = {"outside", "all_claude", "current_tab", "off"}
-#: C5·C6 은 넓은 캡 하나를 공유해 누르면 두 id 가 함께 온다.
+#: C5 and C6 share one wide keycap, so pressing it reports both ids.
 _MOD_KEYS = {"C1", "C2", "C3", "C4", "C7", "KNOB_PRESS"}
 
 
@@ -27,26 +28,63 @@ class Config:
     mod_release_timeout_ms: int = 5000
 
 
+def _reject(value, default, label: str, warnings: list[str]):
+    warnings.append(f"{label}: {value!r} is not usable, fell back to {default!r}")
+    return default
+
+
+def _section(raw: dict, key: str, label: str, warnings: list[str]) -> dict:
+    """A section must be an object. Anything else is ignored -- but say so, or a
+    whole block of the user's config vanishes without a word."""
+    value = raw.get(key)
+    if value is None or isinstance(value, dict):
+        return value or {}
+    warnings.append(f"{label}: expected an object, got {type(value).__name__}; ignored")
+    return {}
+
+
 def _pick(value, allowed: set[str], default: str, label: str,
           warnings: list[str]) -> str:
+    """Enum-ish string. Non-strings never reach the set -- `[] in {...}` raises."""
     if value is None:
         return default
-    if value not in allowed:
-        warnings.append(f"{label}: {value!r} 은 쓸 수 없어 {default!r} 로 대체했습니다")
-        return default
+    if not isinstance(value, str) or value not in allowed:
+        return _reject(value, default, label, warnings)
     return value
 
 
 def _int(source: dict, key: str, default: int, label: str,
          warnings: list[str]) -> int:
-    """숫자가 아니면 기본값으로 떨어뜨린다. 설정 하나 때문에 못 뜨면 안 된다."""
+    """Coerce to int, falling back when that is impossible. Floats truncate
+    (30.7 -> 30) rather than being rejected. One bad value must not block startup."""
     if key not in source:
         return default
+    value = source[key]
+    if isinstance(value, bool):     # bool is an int in Python; almost never intended here
+        return _reject(value, default, label, warnings)
     try:
-        return int(source[key])
-    except (TypeError, ValueError):
-        warnings.append(f"{label}: {source[key]!r} 은 숫자가 아니라 {default} 로 대체했습니다")
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return _reject(value, default, label, warnings)
+
+
+def _bool(source: dict, key: str, default: bool, label: str,
+          warnings: list[str]) -> bool:
+    """Only real JSON booleans. bool("false") is True, which is never what was meant."""
+    if key not in source:
         return default
+    value = source[key]
+    return value if isinstance(value, bool) else _reject(value, default, label, warnings)
+
+
+def _strings(value, default: tuple[str, ...], label: str,
+             warnings: list[str]) -> tuple[str, ...]:
+    """A list of strings. A bare string would otherwise be shredded into characters."""
+    if value is None:
+        return default
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        return _reject(value, default, label, warnings)
+    return tuple(value)
 
 
 def load(path: Path | None) -> tuple[Config, list[str]]:
@@ -57,28 +95,37 @@ def load(path: Path | None) -> tuple[Config, list[str]]:
         try:
             raw = json.loads(path.read_text())
         except Exception as exc:
-            warnings.append(f"설정을 읽지 못해 전부 기본값을 씁니다: {exc}")
+            warnings.append(f"config unreadable, using all defaults: {exc}")
             raw = {}
 
-    gate = raw.get("gate") or {}
-    glow = raw.get("underglow") or {}
-    timing = raw.get("timing") or {}
-    state = raw.get("state") or {}
-    tabs = raw.get("tab_switch") or {}
+    # JSON only guarantees syntax. A file can parse cleanly and still be a list,
+    # or hold a list where a string belongs -- every value below is shape-checked.
+    if not isinstance(raw, dict):
+        warnings.append(f"config must be an object, got {type(raw).__name__}; "
+                        "using all defaults")
+        raw = {}
+
+    gate = _section(raw, "gate", "gate", warnings)
+    glow = _section(raw, "underglow", "underglow", warnings)
+    timing = _section(raw, "timing", "timing", warnings)
+    state = _section(raw, "state", "state", warnings)
+    tabs = _section(raw, "tab_switch", "tab_switch", warnings)
 
     return Config(
         gate_mode=_pick(gate.get("mode"), _GATE_MODES, "frontmost", "gate.mode", warnings),
-        yield_to=tuple(gate.get("yield_to") or ("com.openai.chat",)),
-        own_when=tuple(gate.get("own_when") or ("com.googlecode.iterm2",)),
+        yield_to=_strings(gate.get("yield_to"), ("com.openai.chat",),
+                          "gate.yield_to", warnings),
+        own_when=_strings(gate.get("own_when"), ("com.googlecode.iterm2",),
+                          "gate.own_when", warnings),
         mod_key=_pick(raw.get("mod_key"), _MOD_KEYS, "C7", "mod_key", warnings),
-        knob_tab_switch=bool(tabs.get("knob", True)),
-        mod_direct_tab=bool(tabs.get("mod_direct", True)),
-        underglow_iterm=_pick((glow.get("when_iterm") or {}).get("mode"),
-                              _UNDERGLOW_MODES, "outside",
-                              "underglow.when_iterm.mode", warnings),
-        underglow_codex=_pick((glow.get("when_codex") or {}).get("mode"),
-                              _UNDERGLOW_MODES, "all_claude",
-                              "underglow.when_codex.mode", warnings),
+        knob_tab_switch=_bool(tabs, "knob", True, "tab_switch.knob", warnings),
+        mod_direct_tab=_bool(tabs, "mod_direct", True, "tab_switch.mod_direct", warnings),
+        underglow_iterm=_pick(
+            _section(glow, "when_iterm", "underglow.when_iterm", warnings).get("mode"),
+            _UNDERGLOW_MODES, "outside", "underglow.when_iterm.mode", warnings),
+        underglow_codex=_pick(
+            _section(glow, "when_codex", "underglow.when_codex", warnings).get("mode"),
+            _UNDERGLOW_MODES, "all_claude", "underglow.when_codex.mode", warnings),
         ttl_minutes=_int(state, "ttl_minutes", 30, "state.ttl_minutes", warnings),
         done_fade_seconds=_int(state, "done_fade_seconds", 180,
                                "state.done_fade_seconds", warnings),

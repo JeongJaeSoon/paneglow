@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from paneglow.config import Config, load
 
 
@@ -17,11 +19,11 @@ def test_user_values_override(tmp_path: Path):
     cfg, _ = load(p)
     assert cfg.mod_key == "C4"
     assert cfg.poll_ms == 500
-    assert cfg.gate_mode == "frontmost"      # 손대지 않은 값은 기본값
+    assert cfg.gate_mode == "frontmost"      # untouched values keep defaults
 
 
 def test_shared_keycap_is_rejected_with_warning(tmp_path: Path):
-    """C5·C6 은 넓은 캡 하나를 공유해 두 id 가 함께 온다."""
+    """C5 and C6 share one wide keycap, so pressing it reports both ids."""
     p = tmp_path / "config.json"
     p.write_text(json.dumps({"mod_key": "C5"}))
     cfg, warnings = load(p)
@@ -46,7 +48,7 @@ def test_broken_json_does_not_raise(tmp_path: Path):
 
 
 def test_keep_is_only_allowed_for_other(tmp_path: Path):
-    """keep 은 직전을 참조하므로 when_other 에서만 뜻이 선다."""
+    """keep refers to the previous state, so it only means anything for when_other."""
     p = tmp_path / "config.json"
     p.write_text(json.dumps({"underglow": {"when_iterm": {"mode": "keep"}}}))
     cfg, warnings = load(p)
@@ -55,9 +57,65 @@ def test_keep_is_only_allowed_for_other(tmp_path: Path):
 
 
 def test_non_numeric_timing_falls_back_instead_of_crashing(tmp_path: Path):
-    """설정 하나가 틀렸다고 기동을 막지 않는다."""
+    """One wrong setting must not stop startup."""
     p = tmp_path / "config.json"
     p.write_text(json.dumps({"timing": {"poll_ms": "fast"}}))
     cfg, warnings = load(p)
     assert cfg.poll_ms == 250
     assert any("poll_ms" in w for w in warnings)
+
+
+# JSON only guarantees syntax. Every one of these parses cleanly and used to
+# either raise or silently produce a nonsense Config.
+@pytest.mark.parametrize("body", [
+    "[]",                                        # root is not an object
+    '"just a string"',                           # root is a scalar
+    '{"gate": []}',                              # section is not an object
+    '{"mod_key": []}',                           # unhashable -- `[] in {...}` raises
+    '{"mod_key": 7}',                            # wrong scalar type
+    '{"underglow": {"when_iterm": []}}',         # nested section is not an object
+    '{"timing": {"poll_ms": 1e400}}',            # overflows int()
+    '{"timing": {"poll_ms": true}}',             # bool is an int in Python
+    '{"tab_switch": {"knob": "false"}}',         # truthy string
+    '{"gate": {"yield_to": "com.openai.chat"}}',  # bare string, not a list
+    '{"gate": {"own_when": [1, 2]}}',            # list of non-strings
+])
+def test_any_shape_of_json_still_starts(tmp_path: Path, body: str):
+    p = tmp_path / "config.json"
+    p.write_text(body)
+    cfg, warnings = load(p)          # must not raise
+    assert isinstance(cfg, Config)
+    assert warnings, f"{body} should have warned"
+
+
+def test_bare_string_is_not_shredded_into_characters(tmp_path: Path):
+    """tuple("abc") gives ('a','b','c') -- silently worse than crashing, because
+    the gate would then compare bundle ids against single letters forever."""
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"gate": {"yield_to": "com.openai.chat"}}))
+    cfg, _ = load(p)
+    assert cfg.yield_to == ("com.openai.chat",)
+
+
+def test_string_false_does_not_enable_the_option(tmp_path: Path):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"tab_switch": {"knob": "false"}}))
+    cfg, _ = load(p)
+    assert cfg.knob_tab_switch is True   # default, not the truthy string
+
+
+def test_real_booleans_still_work(tmp_path: Path):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"tab_switch": {"knob": False, "mod_direct": False}}))
+    cfg, warnings = load(p)
+    assert cfg.knob_tab_switch is False
+    assert cfg.mod_direct_tab is False
+    assert warnings == []
+
+
+def test_valid_string_list_is_kept(tmp_path: Path):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"gate": {"yield_to": ["a.b", "c.d"]}}))
+    cfg, warnings = load(p)
+    assert cfg.yield_to == ("a.b", "c.d")
+    assert warnings == []
