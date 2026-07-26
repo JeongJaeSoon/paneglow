@@ -115,11 +115,43 @@ idle #FFFFFF · working #304FFE · waiting #FF6D00 · done #00FF4C · error #FF0
 - USB HID, 벤더 컬렉션 usage page `0xFF00`, **Report ID 6**
 - 프레이밍이 전송별로 다름 — USB `[0x02][len][json]` 63B / BLE `[0x06][0x02][len][json]` 64B
 - `v.oai.*`는 **notification**. `id`를 넣으면 `404 Method not found`
-- `hidapi`의 `open_path()`는 항상 실패한다. IOKit을 직접 써야 한다 (**Input Monitoring** 권한 필요)
+- `hidapi`의 `open_path()`는 항상 실패한다. IOKit을 직접 쓴다
 
 > ⚠️ **성공 리턴 코드는 아무것도 증명하지 않는다.**
 > 잘못 프레이밍된 write도 `kIOReturnSuccess`를 반환하고 조용히 버려진다.
 > 유일하게 믿을 수 있는 건 `device.status` 왕복이다.
+
+### 여는 방법 — Input Monitoring은 필요 없다
+
+**초기 기록은 "Input Monitoring 권한이 필요하다"였고 그것은 틀렸다.**
+`IOServiceGetMatchingServices`에 VID/PID를 넣어 이 기기만 매칭하면 권한 없이 열리고
+읽고 쓴다. 2026-07-26 실측 — 권한이 부여되지 않은 평범한 파이썬으로 왕복 성공.
+
+권한이 필요하다고 오해한 원인은 `IOHIDManagerSetDeviceMatching(NULL)`로 **모든 HID
+기기**를 매칭한 뒤 여는 방식이었다. 거기엔 키보드가 포함되고, 그건 당연히 권한이
+필요하다. 그 실패가 "이 기기를 쓰려면 권한이 필요하다"로 잘못 일반화됐다.
+`IOHIDManagerOpen`은 권한이 없으면 `kIOReturnExclusiveAccess`(`0xE00002C5`)를 낸다.
+
+**기기 식별에 `PrimaryUsagePage == 0xFF00`을 쓰면 안 된다.** macOS가 내주는
+IOHIDDevice는 **하나뿐**이고 그 주 usage는 키보드다:
+
+```
+usage_page=0x0001  usage=0x0006     ← Generic Desktop / Keyboard
+```
+
+`0xFF00`은 그 안의 **하위 컬렉션**이라 주 usage로는 잡히지 않는다.
+`0xFF00`으로 필터링하면 기기를 못 찾는다. VID/PID로만 매칭할 것.
+
+실측 왕복 (권한 없는 인터프리터):
+
+```
+IOServiceGetMatchingServices -> success
+matched 1 IOHIDDevice(s) for 0x303a/0x8360
+  usage_page=0x0001 usage=0x0006  open -> success
+  SetReport -> success
+  <- {"result":{"version":"v0.4.1","profile_index":0,"layer_index":1,
+      "battery":100,"is_charging":false},"id":42,"method":"device.status"}
+```
 
 ### 주요 메서드
 

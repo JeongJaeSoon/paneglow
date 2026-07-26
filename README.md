@@ -45,7 +45,8 @@ python -m pytest tests/ -m integration         # 실기 필요
 - **Layer 1에서만 동작한다.** 터치 센서로 Layer 2+로 넘기면 조용해지고 평범한 매크로패드가 된다.
 - **Codex 앱과 함께 쓸 수 있다.** Codex를 볼 때는 6키를 벤더에게 넘긴다. 다만 완전한 격리는
   불가능하다 — [설계 문서 §03](docs/design.html) 참조.
-- **Input Monitoring 권한과 상주 데몬이 필요하다.** 6키 LED가 벤더 채널을 쓰기 때문에 피할 수 없다.
+- **특별한 권한은 필요 없다.** 벤더 채널은 VID/PID로 이 기기만 열면 Input Monitoring 없이
+  읽고 쓴다. iTerm2 Python API도 유닉스 소켓이라 TCC를 안 탄다. 상주 데몬은 필요하다.
 
 > ⚠️ Work Louder Input 앱의 **Setup 탭에서 펌웨어 플래싱을 누르지 말 것.**
 > 목록에 이 기기용이 없고, BLE 연결 중에는 앱이 "bootloader mode"로 오진한다.
