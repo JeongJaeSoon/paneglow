@@ -18,7 +18,7 @@
 
 ## 1. 물리 배치와 명칭
 
-```
+```text
 행 1    ◯ 노브        [A1] [A2]        ● 조이스틱
 행 2    [A3]  [A4]   [A5]  [A6]
 행 3    [C1⚡] [C2✓]  [C3✗] [C4⤳]
@@ -98,7 +98,7 @@ Work Louder Input 앱의 Layer 2 설정에 Backlight/Underglow 두 존만 있는
 
 ### 공장 상태색 (벤더 문서)
 
-```
+```text
 idle #FFFFFF · working #304FFE · waiting #FF6D00 · done #00FF4C · error #FF0033 · 없음 off
 ```
 
@@ -115,11 +115,78 @@ idle #FFFFFF · working #304FFE · waiting #FF6D00 · done #00FF4C · error #FF0
 - USB HID, 벤더 컬렉션 usage page `0xFF00`, **Report ID 6**
 - 프레이밍이 전송별로 다름 — USB `[0x02][len][json]` 63B / BLE `[0x06][0x02][len][json]` 64B
 - `v.oai.*`는 **notification**. `id`를 넣으면 `404 Method not found`
-- `hidapi`의 `open_path()`는 항상 실패한다. IOKit을 직접 써야 한다 (**Input Monitoring** 권한 필요)
+- `hidapi`의 `open_path()`는 항상 실패한다. IOKit을 직접 쓴다
 
 > ⚠️ **성공 리턴 코드는 아무것도 증명하지 않는다.**
 > 잘못 프레이밍된 write도 `kIOReturnSuccess`를 반환하고 조용히 버려진다.
 > 유일하게 믿을 수 있는 건 `device.status` 왕복이다.
+
+### 여는 방법 — Input Monitoring은 필요 없다
+
+**초기 기록은 "Input Monitoring 권한이 필요하다"였고 그것은 틀렸다.**
+`IOServiceGetMatchingServices`에 VID/PID를 넣어 이 기기만 매칭하면 권한 없이 열리고
+읽고 쓴다. 2026-07-26 실측 — 권한이 부여되지 않은 평범한 파이썬으로 왕복 성공.
+
+권한이 필요하다고 오해한 원인은 `IOHIDManagerSetDeviceMatching(NULL)`로 **모든 HID
+기기**를 매칭한 뒤 여는 방식이었다. 거기엔 키보드가 포함되고, 그건 당연히 권한이
+필요하다. 그 실패가 "이 기기를 쓰려면 권한이 필요하다"로 잘못 일반화됐다.
+`IOHIDManagerOpen`은 권한이 없으면 `kIOReturnExclusiveAccess`(`0xE00002C5`)를 낸다.
+
+**기기 식별에 `PrimaryUsagePage == 0xFF00`을 쓰면 안 된다.** macOS가 내주는
+IOHIDDevice는 **하나뿐**이고 그 주 usage는 키보드다:
+
+```text
+usage_page=0x0001  usage=0x0006     ← Generic Desktop / Keyboard
+```
+
+`0xFF00`은 그 안의 **하위 컬렉션**이라 주 usage로는 잡히지 않는다.
+`0xFF00`으로 필터링하면 기기를 못 찾는다. VID/PID로만 매칭할 것.
+
+실측 왕복 (권한 없는 인터프리터):
+
+```console
+IOServiceGetMatchingServices -> success
+matched 1 IOHIDDevice(s) for 0x303a/0x8360
+  usage_page=0x0001 usage=0x0006  open -> success
+  SetReport -> success
+  <- {"result":{"version":"v0.4.1","profile_index":0,"layer_index":1,
+      "battery":100,"is_charging":false},"id":42,"method":"device.status"}
+```
+
+### 전송 판별 — `Transport` 속성을 쓴다
+
+프레이밍이 전송별로 다르고 틀리면 조용히 버려지므로 판별이 필요하다.
+IOKit의 `Transport` 속성이 신뢰할 수 있는 신호다. **양쪽 다 실측했다.**
+
+| 연결 | `Transport` | 프레이밍 | 왕복 | 점등 |
+|---|---|---|---|---|
+| 유선 | `USB` (추정) | `[0x02][len][json]` 63B | ✅ | ✅ |
+| 무선 | `Bluetooth Low Energy` | `[0x06][0x02][len][json]` 64B | ✅ | ✅ |
+
+```console
+Transport              Bluetooth Low Energy
+Manufacturer           Work Louder
+Product                Codex Micro #1
+PrimaryUsagePage       0x0001 (1)
+PrimaryUsage           0x0006 (6)
+MaxOutputReportSize    0x0040 (64)
+MaxInputReportSize     0x0040 (64)
+
+Transport says 'Bluetooth Low Energy' -> try BLE first
+  BLE: 1 packet(s) x 64 bytes
+  -> REPLY  fw=v0.4.1 layer=1 battery=98
+```
+
+`"USB"`가 들어 있으면 USB, 아니면 BLE로 고르면 된다. 사용자가 유선↔무선을
+오가도 자동으로 맞는다.
+
+> **더 나은 신호일 가능성** (미확인): `MaxOutputReportSize`가 BLE에서 **64**로
+> 나왔다. USB에서 **63**이면 전송 이름을 볼 필요 없이 이 숫자를 프레임 크기로
+> 그대로 쓸 수 있다. 문자열 매칭보다 안전하다. **USB에서 이 값을 재보지 않았다** —
+> 다음에 유선 연결할 때 확인할 것.
+
+BLE로 전환은 터치 센서 3초 홀드 후 탭(§1). 무선일 때는 배터리 값이 100 미만으로
+내려간다(98 관측) — 유선일 때는 충전 중이라 100이었다.
 
 ### 주요 메서드
 
@@ -187,7 +254,16 @@ ChatGPT 앱이 상태를 받아오는 경로. 우리도 붙을 수 있을지 모
 | Python API로 분할 트리 순회 | ✅ (`Splitter vertical=… children=N`) |
 | pane별 `tty`·`cwd`·`jobName` | ✅ |
 | **백그라운드 pane 선택** | ✅ `async_activate(select_tab=False, order_window_front=False)` — Finder를 앞에 둔 채 pane만 이동, iTerm2 창은 올라오지 않음 |
-| 분할 트리 `vertical` 플래그 방향 | ❌ 미확인 (좌우인지 상하인지) |
+| 분할 트리 `vertical` 플래그 방향 | ✅ `vertical=True` = **좌우** 배치 (구분선이 세로) |
+| pane 절대 좌표 API | ❌ 없다. `Session`에 `frame`·`origin` 없음(2.20). `grid_size`(셀 수)만 있다 |
+
+> **iTerm2는 열을 먼저 묶는다.** 2x2 탭의 트리는 `Splitter(vertical=True)[좌열, 우열]`이라
+> 깊이 우선으로 훑으면 **좌상·좌하·우상·우하**가 나온다. 사람이 읽는 순서
+> (좌상·우상·좌하·우하)와 다르므로 좌표를 계산해 `(y, x)`로 정렬해야 한다.
+>
+> 게다가 구분선을 드래그하면 열마다 나뉘는 높이가 달라져 **균등 분할 가정으로는 순서가
+> 뒤바뀐다.** 실측: 왼쪽을 69/23으로, 오른쪽을 46/46으로 나누면 우하 pane이 좌하보다
+> 위에 온다. `grid_size`(셀 수)로 가중해야 맞는다.
 
 > **`jobName`으로 Claude Code pane을 식별할 수 있다** — 버전 문자열(`2.1.220` 형태)로 나온다.
 > 단 이 표기에 의존하므로 Claude Code 업데이트로 깨질 수 있다.

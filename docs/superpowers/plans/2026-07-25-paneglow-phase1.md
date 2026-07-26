@@ -1148,6 +1148,11 @@ git commit -m "feat: add config loading with warn-and-fallback"
 
 실제 iTerm2가 필요하므로 테스트는 `pytest.mark.integration`으로 분리한다.
 
+> **정정 (구현 중 실측):** 아래 `flatten`의 깊이 우선 순회는 **화면 순서를 주지 않는다.**
+> iTerm2는 2x2를 `Splitter(vertical=True)[열, 열]`로 묶으므로 훑으면 좌상·좌하·우상·우하가
+> 나오는데, 사람은 좌상·우상·좌하·우하로 읽는다. 실제 구현은 트리에서 정규화 좌표를
+> 역산해 `(y, x)`로 정렬한다. `src/paneglow/iterm.py`의 `_place()` 참조.
+
 **Files:**
 - Create: `src/paneglow/iterm.py`
 - Test: `tests/test_iterm.py`
@@ -1248,18 +1253,30 @@ def is_claude_job(job_name: str | None) -> bool:
     return bool(job_name) and bool(_VERSION.match(job_name))
 
 
-def flatten(node: Any, leaf: type) -> list:
-    """분할 트리를 읽기 순서(좌→우, 위→아래)로 편다.
-
-    iTerm2 는 children 을 배치 순서대로 준다. 그래서 깊이 우선으로 훑으면
-    화면 순서가 그대로 나온다.
-    """
+# 아래 두 함수가 위 정정의 대상이다. 초안은 깊이 우선이었고, 그것이 틀렸다.
+def _place(node: Any, leaf: type,
+           x: float, y: float, w: float, h: float) -> list[tuple[float, float, Any]]:
+    """분할 트리를 (세로위치, 가로위치, 세션) 목록으로 편다."""
     if isinstance(node, leaf):
-        return [node]
-    out = []
-    for child in getattr(node, "children", []):
-        out += flatten(child, leaf)
+        return [(y, x, node)]
+    children = list(getattr(node, "children", []))
+    if not children:
+        return []
+    vertical = getattr(node, "vertical", True)   # 구분선이 세로 = 좌우 배치
+    out: list[tuple[float, float, Any]] = []
+    step = (w if vertical else h) / len(children)
+    for i, child in enumerate(children):
+        if vertical:
+            out += _place(child, leaf, x + i * step, y, step, h)
+        else:
+            out += _place(child, leaf, x, y + i * step, w, step)
     return out
+
+
+def flatten(node: Any, leaf: type) -> list:
+    """분할 트리를 읽기 순서(위→아래, 좌→우)로 편다."""
+    placed = _place(node, leaf, 0.0, 0.0, 1.0, 1.0)
+    return [session for _, _, session in sorted(placed, key=lambda t: (t[0], t[1]))]
 
 
 async def _pane_of(session) -> Pane:
@@ -1340,6 +1357,20 @@ git commit -m "feat: add iTerm2 adapter with pane discovery and focus"
 하드웨어가 필요하므로 실기 테스트는 `integration` 마커로 분리한다.
 Phase 1의 마지막이자 **처음으로 하드웨어가 실제로 빛나는 지점**이다.
 
+> **정정 (2026-07-26 실측).** 아래 골격에 틀린 전제가 둘 있다.
+>
+> 1. **Input Monitoring 권한은 필요 없다.** VID/PID로 이 기기만 매칭해
+>    `IOServiceGetMatchingServices`로 열면 권한 없이 읽고 쓴다. 권한이 필요했던 것은
+>    모든 HID 기기를 매칭해 여는 방식(`IOHIDManagerSetDeviceMatching(NULL)`)이었다.
+> 2. **`USAGE_PAGE == 0xFF00`으로 기기를 찾으면 안 된다.** macOS가 내주는 IOHIDDevice는
+>    하나뿐이고 그 주 usage는 **키보드**(`usage_page=0x0001 usage=0x0006`)다.
+>    `0xFF00`은 그 안의 하위 컬렉션이라 주 usage로는 안 잡힌다.
+>
+> `device.status` 왕복과 `v.oai.thstatus` 점등을 **USB·BLE 양쪽에서** 확인했다.
+> 전송 판별은 IOKit `Transport` 속성으로 한다 — `"USB"`가 들어 있으면 USB,
+> 아니면 BLE. 따라서 `Pad.transport`는 설정값이 아니라 **기기에서 읽는다.**
+> 근거와 실측 로그는 [`docs/hardware-notes.md`](../../hardware-notes.md) §4.
+
 **Files:**
 - Create: `src/paneglow/pad.py`
 - Test: `tests/test_pad.py`
@@ -1364,6 +1395,7 @@ from paneglow.pad import VENDOR_ID, PRODUCT_ID, USAGE_PAGE, open_pad
 
 def test_device_constants_match_the_hardware():
     assert (VENDOR_ID, PRODUCT_ID) == (0x303A, 0x8360)
+    # 0xFF00 은 하위 컬렉션이라 기기 식별에는 못 쓴다. 아래 정정 참조
     assert USAGE_PAGE == 0xFF00
 
 
@@ -1371,7 +1403,7 @@ def test_device_constants_match_the_hardware():
 def test_status_round_trip_proves_framing():
     """성공 리턴 코드는 아무것도 증명하지 않는다 — 왕복만이 유일한 검증이다."""
     pad = open_pad()
-    assert pad is not None, "패드를 열 수 없습니다 (연결·Input Monitoring 확인)"
+    assert pad is not None, "패드를 열 수 없습니다 — USB 연결과 전원을 확인하세요"
     with pad:
         status = pad.status()
         assert status is not None
@@ -1402,7 +1434,7 @@ IOKit 호출은 ctypes로 감싼다. 참고 구현이 필요하면 검증에 쓴
 
 hidapi 의 open_path() 는 이 기기에서 항상 실패한다 — hidapi 는 컬렉션마다
 경로를 만드는데 macOS 는 0xFF00 을 품은 IOHIDDevice 하나만 내주기 때문이다.
-IOKit 을 직접 쓴다. Input Monitoring 권한이 필요하다.
+IOKit 을 직접 쓴다. VID/PID 로 이 기기만 매칭하므로 TCC 권한은 필요 없다.
 """
 from __future__ import annotations
 
@@ -1594,7 +1626,7 @@ def _cmd_hook() -> int:
 def _cmd_doctor() -> int:
     pad = open_pad()
     if pad is None:
-        print("[FAIL] 패드를 열 수 없습니다 — 연결과 Input Monitoring 권한을 확인하세요")
+        print("[FAIL] 패드를 열 수 없습니다 — USB 연결과 전원을 확인하세요")
         return 1
     with pad:
         status = pad.status()

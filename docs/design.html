@@ -179,16 +179,20 @@
     <span class="label">R6의 정직한 범위</span>
     <p>
       FreeMicro를 걷어낸 사유는 넷이었는데(pane 개별 처리 불가, 설치 부담, TCC 권한, 락 충돌),
-      이 설계도 <strong>Input Monitoring 권한과 상주 데몬을 그대로 요구한다.</strong>
-      6키 LED가 벤더 채널을 쓰는 이상 피할 수 없다.
+      이 설계는 <strong>상주 데몬을 그대로 요구한다.</strong> 그건 피할 수 없다.
     </p>
-    <p>실제로 줄어드는 것은 이것뿐이다:</p>
+    <p>실제로 줄어드는 것:</p>
     <ul>
+      <li><strong>TCC 권한 불필요</strong> — <em>2026-07-26 정정.</em> 초안은 Input Monitoring이
+        필수라고 적었으나 실측에서 뒤집혔다. VID/PID로 이 기기만 매칭해
+        <code>IOServiceGetMatchingServices</code>로 열면 권한 없이 읽고 쓴다.
+        권한이 필요했던 것은 모든 HID 기기를 매칭해 열던 방식이었다
+        (<a href="hardware-notes.md">하드웨어 노트</a>)</li>
       <li><strong>패드 락 충돌 없음</strong> — 웹 편집기·데몬·CLI가 서로 패드를 뺏던 구조가 없다. 프로세스는 데몬 하나</li>
       <li><strong>훅 미설치 세션도 보인다</strong> — <code>jobName</code>으로 pane을 찾으므로(<a href="#state">06</a>), 훅 설치 후 재시작 전까지 통째로 안 보이는 문제가 없다</li>
       <li><strong>Accessibility 권한 불필요</strong> — 키를 합성하지 않고 iTerm2 API로 pane을 고른다</li>
     </ul>
-    <p>“설치가 가벼워진다”는 <strong>주장하지 않는다.</strong></p>
+    <p>“설치가 가벼워진다”는 여전히 <strong>주장하지 않는다</strong> — 데몬은 남는다.</p>
   </div>
 </section>
 
@@ -617,7 +621,7 @@ v.oai.hid (키) ──► MOD 상태 ──┴──► <b>[세대 확정?]</b> 
           <td>데몬 생존, 권한 상태, 패드 연결·전송, 현재 레이어, 소유권, 세대,
               각 키의 배정과 <strong>왜 어두운지</strong></td></tr>
       <tr><td><code>paneglow doctor</code></td>
-          <td>설치 점검 — Input Monitoring, iTerm2 Python API 활성화, 훅 설치, 패드 왕복</td></tr>
+          <td>설치 점검 — 패드 왕복, iTerm2 Python API 활성화, 훅 설치</td></tr>
       <tr><td>장애 표시</td>
           <td>데몬은 살아 있으나 정상 동작 못 할 때 <strong>테두리 느린 깜빡임</strong> — “꺼짐”과 “고장”을 구분</td></tr>
     </tbody>
@@ -686,7 +690,9 @@ v.oai.hid (키) ──► MOD 상태 ──┴──► <b>[세대 확정?]</b> 
   <div class="tw"><table>
     <thead><tr><th style="width:15rem">항목</th><th>용도</th></tr></thead>
     <tbody>
-      <tr><td><strong>Input Monitoring</strong></td><td>벤더 채널 — 6키 LED와 키 입력. 데몬 바이너리에 부여</td></tr>
+      <tr><td><s>Input Monitoring</s> <strong>불필요</strong></td>
+          <td>VID/PID로 이 기기만 열면 권한 없이 벤더 채널을 읽고 쓴다.
+              <em>2026-07-26 실측으로 정정</em></td></tr>
       <tr><td>iTerm2 <strong>Python API 활성화</strong></td><td>pane 트리·포커스. 유닉스 소켓이라 TCC 불필요</td></tr>
       <tr><td>Claude Code 훅</td><td>상태 수집. 설치 후 <strong>기존 세션은 재시작</strong>해야 붙는다</td></tr>
       <tr><td>Accessibility</td><td><strong>불필요</strong> — 키를 합성하지 않는다</td></tr>
