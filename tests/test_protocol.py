@@ -7,7 +7,7 @@ from paneglow.protocol import (
 
 
 def test_thstatus_is_a_notification_without_id():
-    """v.oai.* 에 id 를 넣으면 404 Method not found 가 온다."""
+    """Putting an id on a v.oai.* message returns 404 Method not found."""
     msg = thstatus([0xFF0000] + [None] * 5)
     assert msg["m"] == "v.oai.thstatus"
     assert "id" not in msg
@@ -19,7 +19,7 @@ def test_thstatus_has_six_entries_with_ids():
 
 
 def test_thstatus_none_is_dark_not_dim():
-    """빈 슬롯은 꺼야 한다 — 어둡게가 아니라 꺼짐이어야 개수가 읽힌다."""
+    """An empty slot must be off, not dim -- only then can the count be read."""
     entry = thstatus([None] * 6)["p"][0]
     assert entry["c"] == 0 and entry["b"] == 0 and entry["e"] == 0
 
@@ -35,7 +35,7 @@ def test_thstatus_rejects_wrong_length():
 
 
 def test_status_request_has_an_id():
-    """device.status 는 요청이므로 id 가 필요하다."""
+    """device.status is a request, so it needs an id."""
     assert status_request(9)["id"] == 9
 
 
@@ -74,6 +74,59 @@ def test_decoder_reassembles_a_message():
 
 def test_decoder_ignores_garbage():
     assert FrameDecoder().feed(b"\x00" * 63) == []
+
+
+@pytest.mark.parametrize("chunk", [b"", b"\x06", b"\x02", b"\x06\x02", b"\x02\x05"])
+def test_decoder_survives_a_truncated_report(chunk):
+    """A short read must not be indexed into. feed(b"\\x06\\x02") used to raise
+    IndexError and take the read loop down with it."""
+    assert FrameDecoder().feed(chunk) == []
+
+
+def test_decoder_drops_a_report_that_overstates_its_length():
+    """Declaring 200 bytes while carrying 7 -- taking the partial payload would
+    contaminate the next message."""
+    dec = FrameDecoder()
+    assert dec.feed(bytes([0x02, 200]) + b'{"a":1}') == []
+    assert len(dec._buf) == 0
+
+    out = []
+    for packet in frame({"m": "next"}, USB):
+        out += dec.feed(packet)
+    assert out == [{"m": "next"}]
+
+
+def test_frame_rejects_an_unknown_transport():
+    """Falling through to BLE would produce packets the device drops silently."""
+    with pytest.raises(ValueError):
+        frame({"m": "x"}, "usb")
+    with pytest.raises(ValueError):
+        frame({"m": "x"}, "")
+
+
+def test_decoder_buffer_stays_bounded():
+    """The daemon runs for days. A dropped packet leaves a fragment that never
+    terminates, and without a cap every resync appends behind it forever."""
+    dec = FrameDecoder()
+    for _ in range(1000):
+        dec.feed(bytes([0x02, 60]) + b"x" * 61)
+    assert len(dec._buf) <= 4096
+
+
+def test_decoder_resyncs_after_a_flood():
+    """A desync always costs the one message the leftover is glued to. What must
+    not happen is staying broken: everything after that has to decode again."""
+    dec = FrameDecoder()
+    for _ in range(1000):
+        dec.feed(bytes([0x02, 60]) + b"x" * 61)
+
+    out = []
+    for message in ({"m": "first"}, {"m": "second"}):
+        for packet in frame(message, USB):
+            out += dec.feed(packet)
+
+    assert {"m": "second"} in out, "decoder never resynced"
+    assert len(dec._buf) == 0
 
 
 def test_rgbcfg_touches_only_the_zone_you_name():

@@ -1,8 +1,8 @@
-"""벤더 JSON-RPC 메시지와 HID 프레이밍.
+"""Vendor JSON-RPC messages and HID framing.
 
-프레이밍이 전송별로 다른 것이 이 기기의 가장 큰 함정이다. 잘못 프레이밍한
-write 도 성공을 반환하고 조용히 버려지므로, 여기서 틀리면 증상이 "아무 일도
-안 일어남"으로만 나타난다.
+Framing differing per transport is this device's worst trap. A wrongly framed
+write still returns success and is silently dropped, so a mistake here shows up
+only as "nothing happened".
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ _METHOD_RGBCFG = "v.oai.rgbcfg"
 _EFFECT_OFF = 0
 _EFFECT_SOLID = 1
 
-#: 페이로드가 들어갈 자리. USB 는 [0x02][len], BLE 는 앞에 리포트 id 가 하나 더 붙는다.
+#: Room for the payload. USB is [0x02][len]; BLE prefixes one more report id byte.
 _USB_SIZE, _BLE_SIZE = 63, 64
 _KEY_COUNT = 6
 
@@ -29,7 +29,7 @@ def _entry(index: int, color: int | None) -> dict:
 
 
 def thstatus(colors: list[int | None]) -> dict:
-    """Agent 키 6개를 각각 칠한다. notification 이므로 id 를 넣지 않는다."""
+    """Paint the six agent keys. A notification, so it carries no id."""
     if len(colors) != _KEY_COUNT:
         raise ValueError(f"colors must have {_KEY_COUNT} entries, got {len(colors)}")
     return {"m": _METHOD_THSTATUS,
@@ -42,13 +42,13 @@ def _side(color: int | None) -> dict:
     return {"e": _EFFECT_SOLID, "b": 1, "s": 0, "c": color}
 
 
-#: "생략" 과 "끄기(None)" 를 구분해야 해서 별도 센티널이 필요하다.
+#: Needed to tell "leave this zone alone" apart from "turn this zone off" (None).
 _UNSET = object()
 
 
 def rgbcfg(keys: int | None | object = _UNSET,
            ambient: int | None | object = _UNSET) -> dict:
-    """C키 백라이트(keys)와 테두리(ambient). 생략한 존은 건드리지 않는다."""
+    """C-key backlight (keys) and border (ambient). Omitted zones are untouched."""
     params: dict = {}
     if keys is not _UNSET:
         params["keys"] = _side(keys)          # type: ignore[arg-type]
@@ -60,16 +60,21 @@ def rgbcfg(keys: int | None | object = _UNSET,
 
 
 def status_request(req_id: int = 1) -> dict:
-    """유일하게 믿을 수 있는 건강 확인. 응답이 와야 프레이밍이 맞는 것이다."""
+    """The only trustworthy health check. A reply proves the framing is right."""
     return {"m": "device.status", "id": req_id}
 
 
 def frame(message: dict, transport: str) -> list[bytes]:
-    """메시지를 리포트 크기로 자른다. 메시지는 \\r\\n 으로 끝난다."""
+    """Cut a message into report-sized packets. The message ends with \\r\\n."""
+    if transport not in (USB, BLE):
+        # Falling through to BLE framing would produce packets the device drops
+        # without a word -- the one failure mode this file exists to prevent.
+        raise ValueError(f"unsupported transport: {transport!r}")
+
     body = (json.dumps(message, separators=(",", ":")) + "\r\n").encode()
     prefix = b"" if transport == USB else b"\x06"
     size = _USB_SIZE if transport == USB else _BLE_SIZE
-    room = size - len(prefix) - 2          # 0x02 와 길이 바이트를 뺀 나머지
+    room = size - len(prefix) - 2          # minus the 0x02 and the length byte
 
     packets = []
     for i in range(0, len(body), room):
@@ -79,21 +84,42 @@ def frame(message: dict, transport: str) -> list[bytes]:
     return packets
 
 
+#: A full thstatus is about 300 bytes, so anything past this is a lost terminator,
+#: not a real message. Without a cap the daemon leaks: one dropped packet leaves a
+#: fragment that never completes, and every resync appends behind it.
+_MAX_BUFFER = 4096
+
+
 class FrameDecoder:
-    """조각난 리포트를 다시 메시지로 잇는다."""
+    """Reassembles split reports back into messages.
+
+    A dropped packet costs exactly one message: the leftover fragment glues onto
+    the front of the next one and that line fails to parse. Everything after it
+    decodes normally. Retries cover the loss, so it is not worth real resync
+    machinery here.
+    """
 
     def __init__(self) -> None:
         self._buf = bytearray()
 
     def feed(self, chunk: bytes) -> list[dict]:
-        if len(chunk) < 2:
+        if not chunk:
             return []
-        # 입력 리포트도 [0x02][len] 로 시작한다. 아니면 우리 것이 아니다.
         start = 1 if chunk[0] == 0x06 else 0
+        # A short read must not be indexed into -- header bytes may be missing.
+        if len(chunk) < start + 2:
+            return []
+        # Input reports start with [0x02][len] too. Anything else is not ours.
         if chunk[start] != 0x02:
             return []
+
         length = chunk[start + 1]
-        self._buf += chunk[start + 2:start + 2 + length]
+        end = start + 2 + length
+        if len(chunk) < end:
+            # Declared more than it carries. Taking the partial payload would
+            # contaminate the next message, so drop the whole report.
+            return []
+        self._buf += chunk[start + 2:end]
 
         out = []
         while b"\r\n" in self._buf:
@@ -102,5 +128,11 @@ class FrameDecoder:
             try:
                 out.append(json.loads(line.decode()))
             except Exception:
-                pass          # 못 읽는 줄은 버린다
+                pass          # drop lines we cannot read
+
+        # Whatever is left has no terminator by construction. Past the cap it
+        # never will, so drop it whole -- keeping part of it would glue garbage
+        # onto the front of the next good message and lose that one too.
+        if len(self._buf) > _MAX_BUFFER:
+            self._buf.clear()
         return out
