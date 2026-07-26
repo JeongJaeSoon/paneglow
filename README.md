@@ -16,11 +16,23 @@ macOS 전용. Codex Micro(VID `0x303A` / PID `0x8360`)가 필요하다.
 
 ## 상태
 
-**설계 완료 · 구현 미착수.** 하드웨어 동작은 실측으로 확인했고, 남은 관문 두 가지를
-구현 착수 전에 검증한다.
+**Phase 1 진행 중.** 순수 로직과 iTerm2 어댑터가 동작한다. 패드에 실제로 색이 나가는
+부분(`pad` · `cli`)과 훅 분류기는 아직이다.
+
+| | |
+|---|---|
+| ✅ `state` `store` `render` `protocol` `config` | 순수 로직, 단위 테스트 완료 |
+| ✅ `iterm` | pane 발견·순서·포커스. 실기 확인 완료 |
+| ⬜ `hook` | 훅 페이로드 검증(Phase 0) 결과를 기다린다 |
+| ⬜ `pad` `cli` | IOKit 과 첫 통합 |
 
 - [설계 문서](docs/design.html) — 결정과 근거
 - [하드웨어 노트](docs/hardware-notes.md) — 이 기기에서 직접 확인한 사실
+
+```bash
+python -m pytest tests/ -m "not integration"   # 하드웨어·iTerm2 없이
+python -m pytest tests/ -m integration         # 실기 필요
+```
 
 ## 왜 만드나
 

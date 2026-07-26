@@ -1148,6 +1148,11 @@ git commit -m "feat: add config loading with warn-and-fallback"
 
 실제 iTerm2가 필요하므로 테스트는 `pytest.mark.integration`으로 분리한다.
 
+> **정정 (구현 중 실측):** 아래 `flatten`의 깊이 우선 순회는 **화면 순서를 주지 않는다.**
+> iTerm2는 2x2를 `Splitter(vertical=True)[열, 열]`로 묶으므로 훑으면 좌상·좌하·우상·우하가
+> 나오는데, 사람은 좌상·우상·좌하·우하로 읽는다. 실제 구현은 트리에서 정규화 좌표를
+> 역산해 `(y, x)`로 정렬한다. `src/paneglow/iterm.py`의 `_place()` 참조.
+
 **Files:**
 - Create: `src/paneglow/iterm.py`
 - Test: `tests/test_iterm.py`
