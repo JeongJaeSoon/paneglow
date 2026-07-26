@@ -24,7 +24,7 @@ macOS 전용. Codex Micro(VID `0x303A` / PID `0x8360`)가 필요하다.
 | ✅ `state` `store` `render` `protocol` `config` | 순수 로직, 단위 테스트 완료 |
 | ✅ `iterm` | pane 발견·순서·포커스. 실기 확인 완료 |
 | ⬜ `hook` | 훅 페이로드 검증(Phase 0) 결과를 기다린다 |
-| ⬜ `pad` `cli` | IOKit 과 첫 통합 |
+| ⬜ `pad` `cli` | IOKit과 첫 통합 |
 
 - [설계 문서](docs/design.html) — 결정과 근거
 - [하드웨어 노트](docs/hardware-notes.md) — 이 기기에서 직접 확인한 사실

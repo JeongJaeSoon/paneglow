@@ -1253,18 +1253,30 @@ def is_claude_job(job_name: str | None) -> bool:
     return bool(job_name) and bool(_VERSION.match(job_name))
 
 
-def flatten(node: Any, leaf: type) -> list:
-    """분할 트리를 읽기 순서(좌→우, 위→아래)로 편다.
-
-    iTerm2 는 children 을 배치 순서대로 준다. 그래서 깊이 우선으로 훑으면
-    화면 순서가 그대로 나온다.
-    """
+# 아래 두 함수가 위 정정의 대상이다. 초안은 깊이 우선이었고, 그것이 틀렸다.
+def _place(node: Any, leaf: type,
+           x: float, y: float, w: float, h: float) -> list[tuple[float, float, Any]]:
+    """분할 트리를 (세로위치, 가로위치, 세션) 목록으로 편다."""
     if isinstance(node, leaf):
-        return [node]
-    out = []
-    for child in getattr(node, "children", []):
-        out += flatten(child, leaf)
+        return [(y, x, node)]
+    children = list(getattr(node, "children", []))
+    if not children:
+        return []
+    vertical = getattr(node, "vertical", True)   # 구분선이 세로 = 좌우 배치
+    out: list[tuple[float, float, Any]] = []
+    step = (w if vertical else h) / len(children)
+    for i, child in enumerate(children):
+        if vertical:
+            out += _place(child, leaf, x + i * step, y, step, h)
+        else:
+            out += _place(child, leaf, x, y + i * step, w, step)
     return out
+
+
+def flatten(node: Any, leaf: type) -> list:
+    """분할 트리를 읽기 순서(위→아래, 좌→우)로 편다."""
+    placed = _place(node, leaf, 0.0, 0.0, 1.0, 1.0)
+    return [session for _, _, session in sorted(placed, key=lambda t: (t[0], t[1]))]
 
 
 async def _pane_of(session) -> Pane:
