@@ -60,9 +60,14 @@ def _path(root: Path, session_id: str) -> Path:
 def _load(path: Path) -> SessionRecord | None:
     try:
         raw = json.loads(path.read_text())
-        _checked_id(str(raw["session_id"]))   # a file may name itself anything
+        # The filename is the authority. Letting the contents declare their own
+        # id turns that field into a pointer at another file: a record claiming
+        # "important" makes prune() unlink important.json instead of this one.
+        if raw["session_id"] != path.stem:
+            return None
+        _checked_id(path.stem)
         return SessionRecord(
-            session_id=raw["session_id"], tty=raw["tty"], cwd=raw["cwd"],
+            session_id=path.stem, tty=raw["tty"], cwd=raw["cwd"],
             state=AgentState(raw["state"]), rev=int(raw["rev"]),
             updated_at=float(raw["updated_at"]), pid=int(raw["pid"]),
         )

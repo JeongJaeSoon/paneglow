@@ -56,13 +56,39 @@ def test_session_id_cannot_escape_the_store(tmp_path: Path, session_id):
     assert list(tmp_path.glob("*.json")) == []
 
 
-def test_a_record_that_renames_itself_is_ignored(tmp_path: Path):
-    """The filename is safe, but session_id inside the file need not be."""
+@pytest.mark.parametrize("claimed", ["../escaped", "someone-else", 123, None, ""])
+def test_a_record_that_renames_itself_is_ignored(tmp_path: Path, claimed):
+    """The filename is the authority. A record that declares its own id turns
+    that field into a pointer at another file."""
     write(rec(sid="ok"), tmp_path)
     payload = json.loads((tmp_path / "ok.json").read_text())
-    payload["session_id"] = "../escaped"
+    payload["session_id"] = claimed
     (tmp_path / "ok.json").write_text(json.dumps(payload))
     assert read_all(tmp_path) == []
+
+
+def test_prune_cannot_delete_another_sessions_file(tmp_path: Path):
+    """A dead record claiming a live session's id used to make prune() unlink
+    the live file and leave the dead one behind."""
+    write(rec(sid="important", tty="/dev/ttys002", at=500.0), tmp_path)
+    write(rec(sid="junk", tty="/dev/ttys099", at=100.0), tmp_path)
+
+    payload = json.loads((tmp_path / "junk.json").read_text())
+    payload["session_id"] = "important"
+    (tmp_path / "junk.json").write_text(json.dumps(payload))
+
+    prune(tmp_path, live_ttys={"/dev/ttys002"}, ttl_seconds=999, now=600.0)
+    assert (tmp_path / "important.json").exists(), "the live session was deleted"
+
+
+def test_prune_survives_a_non_string_id(tmp_path: Path):
+    """`"/" in 123` raises TypeError and took prune() down with it."""
+    write(rec(sid="x", tty="/dev/ttys002"), tmp_path)
+    payload = json.loads((tmp_path / "x.json").read_text())
+    payload["session_id"] = 123
+    (tmp_path / "x.json").write_text(json.dumps(payload))
+
+    assert prune(tmp_path, live_ttys=set(), ttl_seconds=1, now=99.0) == 0
 
 
 def test_by_tty_keeps_newest(tmp_path: Path):
