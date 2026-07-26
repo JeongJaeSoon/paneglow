@@ -113,6 +113,25 @@ def test_real_booleans_still_work(tmp_path: Path):
     assert warnings == []
 
 
+@pytest.mark.parametrize("value", [0, -100, 0.5, -1])
+def test_poll_ms_must_be_positive(tmp_path: Path, value):
+    """poll_ms=0 turns the daemon into a busy loop, and 0.5 truncates into it."""
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"timing": {"poll_ms": value}}))
+    cfg, warnings = load(p)
+    assert cfg.poll_ms == 250
+    assert any("poll_ms" in w for w in warnings)
+
+
+def test_done_fade_may_be_zero(tmp_path: Path):
+    """Unlike the intervals, 0 means something here: stop showing done at once."""
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"state": {"done_fade_seconds": 0}}))
+    cfg, warnings = load(p)
+    assert cfg.done_fade_seconds == 0
+    assert warnings == []
+
+
 def test_valid_string_list_is_kept(tmp_path: Path):
     p = tmp_path / "config.json"
     p.write_text(json.dumps({"gate": {"yield_to": ["a.b", "c.d"]}}))

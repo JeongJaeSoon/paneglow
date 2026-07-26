@@ -54,18 +54,26 @@ def _pick(value, allowed: set[str], default: str, label: str,
 
 
 def _int(source: dict, key: str, default: int, label: str,
-         warnings: list[str]) -> int:
+         warnings: list[str], minimum: int = 0) -> int:
     """Coerce to int, falling back when that is impossible. Floats truncate
-    (30.7 -> 30) rather than being rejected. One bad value must not block startup."""
+    (30.7 -> 30) rather than being rejected. One bad value must not block startup.
+
+    Every setting here is a duration or a count, so ``minimum`` guards the values
+    that are nonsense below it -- poll_ms=0 turns the daemon into a busy loop,
+    and 0.5 truncates straight into it.
+    """
     if key not in source:
         return default
     value = source[key]
     if isinstance(value, bool):     # bool is an int in Python; almost never intended here
         return _reject(value, default, label, warnings)
     try:
-        return int(value)
+        number = int(value)
     except (TypeError, ValueError, OverflowError):
         return _reject(value, default, label, warnings)
+    if number < minimum:
+        return _reject(value, default, label, warnings)
+    return number
 
 
 def _bool(source: dict, key: str, default: bool, label: str,
@@ -126,10 +134,14 @@ def load(path: Path | None) -> tuple[Config, list[str]]:
         underglow_codex=_pick(
             _section(glow, "when_codex", "underglow.when_codex", warnings).get("mode"),
             _UNDERGLOW_MODES, "all_claude", "underglow.when_codex.mode", warnings),
-        ttl_minutes=_int(state, "ttl_minutes", 30, "state.ttl_minutes", warnings),
+        ttl_minutes=_int(state, "ttl_minutes", 30, "state.ttl_minutes",
+                         warnings, minimum=1),
+        # 0 is meaningful here: fade off immediately.
         done_fade_seconds=_int(state, "done_fade_seconds", 180,
-                               "state.done_fade_seconds", warnings),
-        poll_ms=_int(timing, "poll_ms", 250, "timing.poll_ms", warnings),
+                               "state.done_fade_seconds", warnings, minimum=0),
+        poll_ms=_int(timing, "poll_ms", 250, "timing.poll_ms",
+                     warnings, minimum=1),
         mod_release_timeout_ms=_int(timing, "mod_release_timeout_ms", 5000,
-                                    "timing.mod_release_timeout_ms", warnings),
+                                    "timing.mod_release_timeout_ms",
+                                    warnings, minimum=1),
     ), warnings
