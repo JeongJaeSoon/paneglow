@@ -1,18 +1,32 @@
-"""세션 레코드 저장소.
+"""Session record store.
 
-훅은 짧게 여러 개가 겹쳐 실행되므로 쓰기는 반드시 원자적이어야 한다.
-임시 파일에 쓰고 fsync 한 뒤 같은 디렉터리로 rename 하면, 읽는 쪽은
-언제 읽어도 온전한 파일을 보거나 아예 못 본다 — 반쪽짜리는 없다.
+Hooks fire overlapping and short-lived, so writes must be atomic. Writing to a
+temp file, fsyncing it, then renaming within the same directory means a reader
+either sees a whole file or does not see it at all -- never a half-written one.
+
+Rename alone is not enough for the writers, though. "Is my rev newer" and the
+rename are two steps, and two hooks can both pass the check before either lands
+-- then completion order decides, not rev order. The loss that matters is Stop
+(done) being overwritten by a PostToolUse (working) that read stale: Stop is the
+last event of a turn, so nothing corrects it and the pane stays blue. Hence the
+lock around check-and-write.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from paneglow.state import AgentState
+
+#: ponytail: one lock for the whole store, not one per session. Writes are a few
+#: hundred bytes and only happen on state changes, so contention is not a concern
+#: at this scale. Split it per session_id if that ever stops being true.
+_LOCK_NAME = ".write.lock"
 
 
 @dataclass(frozen=True)
@@ -39,30 +53,43 @@ def _load(path: Path) -> SessionRecord | None:
             updated_at=float(raw["updated_at"]), pid=int(raw["pid"]),
         )
     except Exception:
-        # 깨진 파일은 정상적인 일이다 — 쓰는 도중일 수도 있다. 다음 틱에 다시 읽는다.
+        # A broken file is normal -- it may be mid-write. Read again next tick.
         return None
 
 
+@contextmanager
+def _write_lock(root: Path):
+    """Serialise check-and-write across hook processes. flock is released when
+    the fd closes, so a hook that dies mid-write cannot wedge the store."""
+    with open(root / _LOCK_NAME, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def write(record: SessionRecord, root: Path) -> bool:
-    """rev 가 기존보다 크면 원자적으로 쓴다. 아니면 False."""
+    """Write atomically if rev is newer than what is stored. Otherwise False."""
     root.mkdir(parents=True, exist_ok=True)
     target = _path(root, record.session_id)
 
-    existing = _load(target)
-    if existing is not None and record.rev <= existing.rev:
-        return False
+    with _write_lock(root):
+        existing = _load(target)
+        if existing is not None and record.rev <= existing.rev:
+            return False
 
-    payload = asdict(record) | {"state": record.state.value}
-    fd, tmp = tempfile.mkstemp(dir=root, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, target)   # 같은 디렉터리라 원자적이다
-    except Exception:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+        payload = asdict(record) | {"state": record.state.value}
+        fd, tmp = tempfile.mkstemp(dir=root, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(payload, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)   # atomic: same directory
+        except Exception:
+            Path(tmp).unlink(missing_ok=True)
+            raise
     return True
 
 
@@ -78,7 +105,7 @@ def read_all(root: Path) -> list[SessionRecord]:
 
 
 def by_tty(records: list[SessionRecord]) -> dict[str, SessionRecord]:
-    """tty 하나당 하나. 껐다 켠 pane 에는 레코드가 둘 남으므로 최신만 쓴다."""
+    """One record per tty. A restarted pane leaves two, so keep the newest."""
     picked: dict[str, SessionRecord] = {}
     for r in records:
         cur = picked.get(r.tty)
@@ -89,15 +116,23 @@ def by_tty(records: list[SessionRecord]) -> dict[str, SessionRecord]:
 
 def prune(root: Path, live_ttys: set[str] | None,
           ttl_seconds: float, now: float) -> int:
-    """죽은 세션 파일을 지운다.
+    """Delete records for dead sessions.
 
-    ``live_ttys`` 를 알면 그게 기준이다 — 조용해도 iTerm2 에 있으면 살아 있다.
-    모를 때(iTerm2 조회 실패)만 TTL 로 떨어진다.
+    When ``live_ttys`` is known it decides -- a quiet pane is still alive as long
+    as iTerm2 has it. TTL is the fallback for when iTerm2 cannot be reached.
+
+    A record also dies when a newer one has taken over its tty. Liveness of the
+    tty string alone would keep the old one forever: the pty gets recycled for
+    the next pane, so the tty stays live while the session behind it is gone.
     """
+    records = read_all(root)
+    current = {r.session_id for r in by_tty(records).values()}
+
     removed = 0
-    for rec in read_all(root):
-        dead = (rec.tty not in live_ttys) if live_ttys is not None \
-            else (now - rec.updated_at > ttl_seconds)
+    for rec in records:
+        superseded = rec.session_id not in current
+        dead = superseded or ((rec.tty not in live_ttys) if live_ttys is not None
+                              else (now - rec.updated_at > ttl_seconds))
         if dead:
             _path(root, rec.session_id).unlink(missing_ok=True)
             removed += 1

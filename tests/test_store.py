@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 
 from paneglow.state import AgentState
@@ -36,8 +37,8 @@ def test_corrupt_file_is_skipped(tmp_path: Path):
 
 def test_no_partial_file_left_behind(tmp_path: Path):
     write(rec(), tmp_path)
-    # 임시 파일이 남지 않아야 한다
-    assert [p.name for p in tmp_path.iterdir()] == ["s1.json"]
+    assert list(tmp_path.glob("*.tmp")) == []
+    assert [p.name for p in tmp_path.glob("*.json")] == ["s1.json"]
 
 
 def test_by_tty_keeps_newest(tmp_path: Path):
@@ -56,14 +57,60 @@ def test_prune_removes_dead_tty(tmp_path: Path):
 
 
 def test_prune_keeps_quiet_but_live_session(tmp_path: Path):
-    """훅은 상태가 바뀔 때만 온다 — 조용해도 iTerm2 에 있으면 살아 있다."""
+    """Hooks only fire on change. A quiet pane iTerm2 still has is alive."""
     write(rec(sid="quiet", tty="/dev/ttys002", at=0.0), tmp_path)
     removed = prune(tmp_path, live_ttys={"/dev/ttys002"}, ttl_seconds=10, now=99999.0)
     assert removed == 0
 
 
 def test_prune_ttl_is_only_a_fallback(tmp_path: Path):
-    """iTerm2 조회가 실패해 live_ttys 를 모를 때만 TTL 이 작동한다."""
+    """TTL only kicks in when iTerm2 could not be reached and live_ttys is unknown."""
     write(rec(sid="stale", tty="/dev/ttys002", at=0.0), tmp_path)
     removed = prune(tmp_path, live_ttys=None, ttl_seconds=10, now=99999.0)
     assert removed == 1
+
+
+def test_prune_reclaims_a_record_whose_tty_was_reused(tmp_path: Path):
+    """A pty gets recycled for the next pane, so the tty stays live while the
+    session behind it is gone. Liveness of the tty string alone leaks forever."""
+    write(rec(sid="closed", tty="/dev/ttys005", at=100.0), tmp_path)
+    write(rec(sid="reopened", tty="/dev/ttys005", at=200.0), tmp_path)
+
+    removed = prune(tmp_path, live_ttys={"/dev/ttys005"}, ttl_seconds=999, now=201.0)
+    assert removed == 1
+    assert {r.session_id for r in read_all(tmp_path)} == {"reopened"}
+
+
+def test_concurrent_writers_cannot_lose_a_newer_state(tmp_path: Path, monkeypatch):
+    """Two hooks both pass the rev check before either renames, and completion
+    order decides. The loss that matters is Stop(done) being overwritten by a
+    stale PostToolUse(working): Stop is the last event, so nothing corrects it.
+    """
+    import threading
+    from paneglow import store
+
+    write(rec(sid="s1", rev=4, state=AgentState.IDLE), tmp_path)
+
+    real_load = store._load
+
+    def slow_load(path):
+        """Hold the check-and-write window wide open."""
+        got = real_load(path)
+        time.sleep(0.2)
+        return got
+
+    monkeypatch.setattr(store, "_load", slow_load)
+
+    def run(revision, state):
+        store.write(rec(sid="s1", rev=revision, state=state), tmp_path)
+
+    done = threading.Thread(target=run, args=(6, AgentState.DONE))
+    done.start()
+    time.sleep(0.05)          # start the second writer inside the first's window
+    working = threading.Thread(target=run, args=(5, AgentState.WORKING))
+    working.start()
+    done.join(); working.join()
+
+    final = read_all(tmp_path)[0]
+    assert final.rev == 6
+    assert final.state is AgentState.DONE
