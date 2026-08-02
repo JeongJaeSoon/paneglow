@@ -211,10 +211,32 @@ matched 1 IOHIDDevice(s) for 0x303a/0x8360
 프레이밍이 전송별로 다르고 틀리면 조용히 버려지므로 판별이 필요하다.
 IOKit의 `Transport` 속성이 신뢰할 수 있는 신호다. **양쪽 다 실측했다.**
 
-| 연결 | `Transport` | 프레이밍 | 왕복 | 점등 |
-|---|---|---|---|---|
-| 유선 | `USB` (추정) | `[0x02][len][json]` 63B | ✅ | ✅ |
-| 무선 | `Bluetooth Low Energy` | `[0x06][0x02][len][json]` 64B | ✅ | ✅ |
+| 연결 | `Transport` | `Product` | 프레이밍 | 왕복 | 점등 | 효과 |
+|---|---|---|---|---|---|---|
+| 유선 | `USB` | `Codex Micro` | `[0x02][len][json]` 63B | ✅ | ✅ | ✅ |
+| 무선 | `Bluetooth Low Energy` | `Codex Micro #1` | `[0x06][0x02][len][json]` 64B | ✅ | ✅ | ✅ |
+
+> **`Transport` 는 `"BLE"` 로 오지 않는다.** IOKit이 주는 문자열은 `'Bluetooth Low Energy'`
+> 전체다. 코드에서 `"BLE"` 와 같은지 비교하면 무선에서 깨진다 — 2026-08-02 실측으로
+> `protocol.py` 의 `BLE = "BLE"` 상수가 이 값과 안 맞는 것을 확인했다. 정규화가 필요하다.
+>
+> **`Product` 이름도 전송에 따라 다르다.** 유선 `Codex Micro`, 무선 `Codex Micro #1`.
+> 이름으로 기기를 찾으면 한쪽에서 깨진다. **VID/PID 로만 매칭할 것.**
+
+#### 무선 재측정 상세 (2026-08-02)
+
+초안은 무선에서 왕복과 점등만 봤다. 효과·키별 색·연속 write 까지 채웠다.
+
+| 확인 | 결과 |
+|---|---|
+| `device.status` 왕복 | `{version: v0.4.1, profile_index: 0, layer_index: 1, battery: 100, is_charging: false}` |
+| 테두리 색 | `#FF6D00` · `#304FFE` 둘 다 정상 |
+| A1~A6 개별 색 | 흰·파랑·주황·초록·빨강 + 소등. 유선과 동일 |
+| **효과 다섯 종류** | `e1` 켜짐 · `e2` 회전 · `e3` 무지개 회전 · `e4` 깜빡임 · `e6` 펄스. **유선과 동일** |
+| **연속 write 유실** | `e4`↔`e6` 를 6초 간격으로 6회 번갈아 보내 **6회 모두 ACK 수신**. 관측 범위에서 유실 없음 |
+
+**무선이라고 달라지는 것은 프레이밍뿐이다.** 프레이밍만 맞으면 기능 차이는 없었다.
+다만 유실 대비(재전송·시퀀스)는 아직 없고, 6회 표본은 유실 부재의 증명이 못 된다.
 
 ```console
 Transport              Bluetooth Low Energy
