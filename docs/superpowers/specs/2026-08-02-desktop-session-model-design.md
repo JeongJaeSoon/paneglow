@@ -20,11 +20,46 @@
 | R2 | 키를 누르면 **그 세션이 Claude 앱에서 열린다** |
 | R3 | 세션이 6개를 넘어도 최근 것 위주로 보여준다. 배치는 예측 가능할 것 |
 | R4 | Codex 앱을 볼 때 6키를 벤더에게 양보 |
-| R5 | 테두리 LED로 6키에 안 보이는 대기·오류를 알린다 |
-| R6 | 특별한 권한을 요구하지 않는다 |
+| R5 | **테두리 LED로 지금 6키가 누구 것인지 즉시 알 수 있다** |
+| R6 | 6키에 안 보이는 대기·오류를 알린다 |
+| R7 | 특별한 권한을 요구하지 않는다 |
 
 **승인/거절(C2·C3)은 범위에서 제외한다.** 데스크톱 앱에는 세션에 응답을 보낼 수단이 없고,
-남은 길은 Accessibility 권한으로 앱 UI를 찌르는 것뿐이라 R6과 정면으로 충돌한다.
+남은 길은 Accessibility 권한으로 앱 UI를 찌르는 것뿐이라 R7과 정면으로 충돌한다.
+
+## 조명 존 셋 — 각자 하나씩만 맡는다
+
+기존 설계는 테두리 하나에 "화면 밖 대기 알림"을 몰아넣었다. 그런데 우리는 벤더와 **같은 팔레트**를
+일부러 쓰므로(주황=대기, 초록=완료…) **6키만 봐서는 Codex 것인지 Claude 것인지 구분되지 않는다.**
+세 존이 서로 독립이라는 것은 실측된 하드웨어 사실이므로, 존마다 뜻을 하나씩 준다.
+
+| 존 | 명령 | 뜻 |
+|---|---|---|
+| **A1~A6** | `thstatus` | 세션별 상태. 키마다 다른 색 |
+| **테두리** | `rgbcfg` → `ambient` | **지금 6키가 누구 것인가** |
+| **C1~C7 백라이트** | `rgbcfg` → `keys` | 6키에 안 보이는 곳의 `waiting`·`error` |
+
+테두리 색은 **각 제품의 고유색**을 쓴다. 배우지 않아도 읽히는 것이 목적이므로,
+임의로 고른 색보다 브랜드색이 낫다. 아래 값은 실제 앱 번들의 아이콘에서 뽑았다.
+
+| 소유 | 기본색 | 출처 |
+|---|---|---|
+| Claude | `#D87050` 오렌지 | `Claude.app/Contents/Resources/electron.icns` 지배색. 공식 `#D97757`과 일치 |
+| Codex (양보 중) | `#6888F8` 블루 | `ChatGPT.app/…/icon-codex-dark-color.png` 지배색. 어두운 쪽 끝은 `#3040F8` |
+| 무소유 · 게이트 off · 레이어 ≠ 1 | 소등 | |
+
+> 재현 방법: `sips -s format bmp -Z 64 <icon> --out x.bmp` 후 무채색·저휘도 픽셀을 뺀
+> 최빈색. ChatGPT의 `electron.icns`·`icon-chatgpt.icns`는 흑백이라 쓸 수 없다 —
+> Codex 전용 아이콘(`icon-codex-*`)에만 색이 있다.
+
+**A키 팔레트와 가깝다는 점은 감수한다.** 상태색 `waiting #FF6D00` · `working #304FFE`와
+색상 계열이 같지만, 둘은 채도가 확연히 낮고(`#D87050` vs `#FF6D00`) 무엇보다 **존이 물리적으로
+떨어져 있다.** 테두리는 이제 상태를 전혀 표시하지 않으므로 테두리 안에서의 모호함은 없다.
+헷갈리면 설정으로 바꾼다.
+
+C키 백라이트는 집계 결과가 `waiting`이면 주황, `error`면 빨강, 그 외에는 **끈다** —
+켜두면 항상 켜져 신호가 죽는다. 집계 대상은 슬롯에 못 오른 세션 전부이고,
+Codex를 볼 때는 **모든 Claude 세션**이 대상이다(전부 화면 밖이므로).
 
 ## 아키텍처
 
@@ -122,7 +157,7 @@ def assign(prev: list[str | None],          # 직전 배정 (길이 6)
 3. 슬롯이 가득 찬 상태에서 새 세션이 오면 **가장 오래 조용한 세션**을 밀어낸다.
 4. 이미 슬롯을 가진 세션은 **절대 움직이지 않는다.**
 
-밀려난 세션과 7번째 이후 세션은 테두리 집계로 넘어간다 — 6키에도 테두리에도 없어
+밀려난 세션과 7번째 이후 세션은 **C키 백라이트 집계**로 넘어간다 — 6키에도 C키에도 없어
 완전히 사라지는 세션이 생기면 안 된다.
 
 **`recent`** — 매 틱 최근 활동순으로 재정렬. Codex 순정과 같은 동작.
@@ -140,7 +175,9 @@ class Session:
     state: AgentState | None      # None = 훅이 아직 아무것도 안 썼다 → 소등
 ```
 
-팔레트와 우선순위, 테두리 규칙(`waiting`·`error`만 켠다)은 변경 없다.
+팔레트와 우선순위는 변경 없다. 기존 `underglow_for()` 는 이름만 `ckeys_for()` 로 바뀐다 —
+계산은 같고(집계에서 `waiting`·`error`만 켠다) 어느 존으로 나가느냐만 달라진다.
+테두리는 상태를 전혀 보지 않으므로 `render` 를 거치지 않고 게이트가 직접 칠한다.
 
 ## 딥링크 — `deeplink.py`
 
@@ -163,18 +200,18 @@ claude://claude.ai/claude-code-desktop/<local_sessionId>
 
 ## 게이트
 
-**레이어 게이트**는 그대로다. `layer_index != 1`이면 6키와 입력을 포기하고, 테두리는 설정에 따라 유지한다.
+**레이어 게이트**는 그대로다. `layer_index != 1`이면 6키와 입력을 포기하고, 테두리·C키는 설정에 따라 유지한다.
 하드웨어 사실이라 협상 불가.
 
 **frontmost 게이트**는 bundle id만 갈아끼운다. `NSWorkspace` 활성 앱 변경 알림(폴백 1초),
 TCC 권한 불필요.
 
-| 보고 있는 앱 | 6키 | 테두리 | 입력 |
-|---|---|---|---|
-| `com.anthropic.claudefordesktop` | 우리 | 슬롯 밖 `waiting`·`error` | 처리 |
-| `com.openai.codex` | **소등 후 양보** | 모든 세션 집계 | 처리 안 함 |
-| 그 외 | 직전 유지 | 직전 유지 | 직전 기준 |
-| 기동 직후 | 무소유(소등) | 끔 | 처리 안 함 |
+| 보고 있는 앱 | 6키 | 테두리 | C키 백라이트 | 입력 |
+|---|---|---|---|---|
+| `com.anthropic.claudefordesktop` | 우리 | **오렌지** | 슬롯 밖 `waiting`·`error` | 처리 |
+| `com.openai.codex` | **소등 후 양보** | **블루** | 모든 Claude 세션 집계 | 처리 안 함 |
+| 그 외 | 직전 유지 | 직전 유지 | 직전 유지 | 직전 기준 |
+| 기동 직후 | 무소유(소등) | 소등 | 소등 | 처리 안 함 |
 
 > 기존 `config.py` 기본값 `com.openai.chat`은 **틀렸다.** Codex 데스크톱 앱의 실제 bundle id는
 > `com.openai.codex` 다. 지금 게이트를 켜면 Codex 앞에서 양보하지 않는다.
@@ -193,10 +230,13 @@ Codex 스레드 상태로 오독된다.
   },
   "layer_gate": { "keys": "off", "underglow": "keep" },
   "slots":  { "order": "recent_sticky" },         // recent_sticky | recent | priority
-  "underglow": {
-    "when_claude": { "mode": "outside" },         // outside | all_sessions | off
-    "when_codex":  { "mode": "all_sessions" },
-    "when_other":  { "mode": "keep" }             // keep 은 여기서만
+  "underglow": {                                  // 테두리 = 소유권
+    "claude": "#D87050",                          // Claude 오렌지
+    "codex":  "#6888F8",                          // Codex 블루
+    "enabled": true
+  },
+  "ckeys": {                                      // C키 백라이트 = 화면 밖 경보
+    "mode": "outside"                             // outside | all_sessions | off
   },
   "state":  { "ttl_minutes": 30, "done_fade_seconds": 180,
               "working_max_seconds": 900 },
@@ -209,7 +249,7 @@ ESC로 턴을 중단하면 `Stop`이 오지 않아 세션이 영원히 파랑에
 떨어뜨린다 — "모르겠다"가 "작업 중"이라는 거짓말보다 낫다.
 
 **삭제**: `mod_key` · `tab_switch` · `double_tap` · `approve` · `experimental.codex_status` ·
-`underglow.when_iterm` · `underglow.*.current_tab` 모드.
+구 `underglow.when_iterm` · `underglow.*.current_tab` 모드.
 
 설정 오류는 해당 키만 기본값으로 폴백하고 경고를 모은다. 기동을 거부하지 않는다 — 기존 동작 유지.
 
@@ -223,9 +263,9 @@ ESC로 턴을 중단하면 `Stop`이 오지 않아 세션이 영원히 파랑에
 | 딥링크 매핑을 못 찾음 | 무동작. 로그만 |
 | `open` 실패 | 무동작. LED는 건드리지 않는다 |
 | 패드 미연결 | 재시도. 상태 수집은 계속. 재연결 시 전체 재도색 |
-| 레이어가 1이 아님 | 6키·입력 포기. 테두리는 설정대로 |
+| 레이어가 1이 아님 | 6키·입력 포기. 테두리·C키는 설정대로 |
 | macOS 절전 → 복귀 | HID·타이머 재수립, 전체 재도색 |
-| 데몬 종료 | 6키·테두리를 끄고 나간다 |
+| 데몬 종료 | 6키·테두리·C키를 끄고 나간다 |
 
 LED는 읽을 수 없으므로 덮어쓰기를 감지할 수 없다. 주기적 재도색은 하지 않고
 **이름 붙일 수 있는 사건**에서만 다시 칠한다 — 게이트 전환, 레이어 변화, 패드 재연결,
@@ -241,7 +281,7 @@ LED는 읽을 수 없으므로 덮어쓰기를 감지할 수 없다. 주기적 �
 | `slots.py` | 순수 함수. 등장·소멸·7개 초과·밀어내기·정책 3종·슬롯 불변 |
 | `deeplink.py` | 매핑 파일 픽스처 + `subprocess` 목킹. URL 문자열을 정확히 검증 |
 | `store.py` | 기존 테스트에서 tty 관련만 정리 |
-| `render` `state` `protocol` `config` | 기존 테스트 유지 |
+| `render` `state` `protocol` `config` | 기존 테스트 유지. `underglow_for` → `ckeys_for` 개명 반영 |
 | `daemon` | 넷 다 목킹. 게이트 전환·양보 시 소등 |
 
 ## 삭제 목록
@@ -261,6 +301,7 @@ LED는 읽을 수 없으므로 덮어쓰기를 감지할 수 없다. 주기적 �
 
 | 항목 | 대응 |
 |---|---|
+| **벤더 컬렉션 `0xFF00` 이 안 보인다** | 2026-08-02 실측: `Codex Micro` 가 USB로 붙어 있는데도 `usagePage=0x0001`(키보드) 컬렉션 하나뿐. **Karabiner-Elements 가 돌고 있고 벤더가 공식 경고한 간섭원이다.** Karabiner 종료 후 재측정이 첫 단계 |
 | 살아 있는 CLI 세션에 딥링크를 걸면 | 매핑이 없으면 무동작. 확인 후 필요하면 필터 추가 |
 | 갓 생긴 세션의 `local_*.json` 기록 시점 | 잠시 못 누를 수 있다. `status`가 사유를 표시 |
 | 계정이 여럿일 때 `<org>/<account>` 다중 | glob으로 전부 훑는다 |
