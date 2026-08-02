@@ -1,5 +1,11 @@
 # paneglow Phase 1 구현 계획
 
+> **이 계획서는 대체되었다.** iTerm2 pane 모델을 전제로 쓰였다. 현재 설계는
+> [2026-08-02-desktop-session-model-design.md](../specs/2026-08-02-desktop-session-model-design.md).
+> Task 0(훅 관문)과 순수 모듈 태스크들은 유효하고 이미 병합됐다.
+> `iterm` 관련 태스크와 tty 기반 매핑은 무효다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Codex Micro의 6개 Agent 키가 현재 iTerm2 탭의 pane별 Claude Code 상태를 색으로 표시하고, 키를 누르면 그 pane으로 이동한다.
