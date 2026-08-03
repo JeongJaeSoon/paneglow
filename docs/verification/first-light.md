@@ -132,6 +132,29 @@ trace를 후속 구현했다. trace의 mailbox, 경계값, 정규화 출력과 �
 USB/BLE protocol과 과거 실기 왕복 근거는 [하드웨어 실측 노트](../hardware-notes.md)에 있다.
 그 근거는 이번 installed-product 하드웨어 E2E를 대신하지 않는다.
 
+## 2026-08-04 로그인 자동 시작 실측
+
+`323b0b8` 설치본으로 실제 per-user LaunchAgent 수명주기를 확인했다. 시작 전에는 자동 시작이
+설치되지 않았고, 수동 daemon PID 2960이 USB v0.4.1 Layer 1 패드를 정상 보고하고 있었다.
+
+- `autostart install --timeout 15`가 수동 daemon을 종료하고 launchd 소유 PID 60546으로
+  전환했다. `launchctl print`와 설치 plist에서 현재 저장소의
+  `.venv/bin/python -m paneglow.cli run`, `KeepAlive/SuccessfulExit=false`, umask 077을 확인했다.
+- plist, 계정 전역 installer lock, daemon log는 현재 계정 소유·mode 0600·link count 1이었고,
+  `~/.paneglow`는 0700으로 강화됐다. 설치 plist는 `plutil -lint`를 통과했다.
+- 같은 install을 반복하면 PID 60546을 유지한 채 already-installed no-op으로 끝났다.
+- `paneglow stop` 뒤 daemon은 stopped, plist는 current/not-loaded가 됐다. 12초 뒤에도 daemon과
+  launchd job은 다시 생기지 않았다.
+- `paneglow start --timeout 15`가 plist를 다시 bootstrap해 PID 62049를 올렸고, USB v0.4.1
+  Layer 1 상태가 복구됐다.
+- uninstall은 daemon과 plist/job을 제거했고, 두 번째 uninstall은 already-uninstalled
+  no-op이었다. 그 뒤 다시 install해 기록 종료 시 PID 63096이 current/loaded 상태였다.
+- 최종 `status`, `doctor`, `pip check`가 통과했다. 0.5초 `trace-input`은 빈 이벤트 배열을
+  반환했고 request/active/result 임시 파일을 남기지 않았다.
+
+이 실측에는 logout/login 또는 재부팅이 포함되지 않았다. 따라서 다음 로그인에서 별도
+`paneglow start` 없이 올라오는지는 여전히 사용자 입회 검증으로 남는다.
+
 ## 남은 사용자 확인
 
 daemon을 시작한 뒤 Claude Desktop을 전면에 두고 다음 명령을 실행한다.
@@ -153,9 +176,8 @@ transport 중복의 원인, 정확한 앱 focus 전환 시각 자체를 이 결�
 
 ## 다시 사용할 때
 
-현재 daemon 실행 여부는 이 기록으로 단정하지 않는다. 이 측정 뒤 per-user LaunchAgent
-설치·상태·제거 CLI가 구현됐지만, 이 문서의 2026-08-04 installed-product 실행에는 실제
-`launchctl bootstrap`과 logout/login 반복이 포함되지 않았다. 먼저 다음 명령으로 확인한다.
+기록 종료 시 per-user LaunchAgent는 current/loaded였고 PID 63096이 USB Layer 1 패드를
+보고했다. 이 시점 상태를 이후 실행 상태로 단정하지 말고 먼저 다음 명령으로 확인한다.
 
 ```bash
 cd /path/to/paneglow
@@ -164,8 +186,7 @@ cd /path/to/paneglow
 .venv/bin/paneglow doctor
 ```
 
-자동 시작이 아직 설치되지 않았으면 `.venv/bin/paneglow autostart install`을 실행한다. 실제
-logout/login 또는 재부팅 뒤 별도 `start` 없이 올라오는지는 후속 installed-product 검증으로
-남아 있다. Claude Desktop이 Agent 키를 소유할 때 A1은 현재 live 세션을 연다. Codex가 전면이면
-Paneglow는 의도적으로 자신의 dispatch를 양보한다. 이는 Codex의 동일 raw 입력 처리를
-중단시키지는 않는다.
+자동 시작이 아직 설치되지 않았으면 `.venv/bin/paneglow autostart install`을 실행한다.
+logout/login 또는 재부팅 뒤 별도 `start` 없이 올라오는지는 아직 확인하지 않았다. Claude
+Desktop이 Agent 키를 소유할 때 A1은 현재 live 세션을 연다. Codex가 전면이면 Paneglow는
+의도적으로 자신의 dispatch를 양보한다. 이는 Codex의 동일 raw 입력 처리를 중단시키지는 않는다.
