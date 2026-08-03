@@ -6,6 +6,7 @@ is deterministic in tests.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Protocol
 
@@ -16,6 +17,12 @@ from paneglow.state import AgentState
 
 
 Owner = Literal["none", "claude", "codex"]
+InputKey = Literal["A1", "A2", "A3", "A4", "A5", "A6", "other"]
+InputAction = Literal[0, 1, "other"]
+InputResult = Literal[
+    "opened", "open_failed", "empty_slot", "ignored_owner",
+    "ignored_layer", "ignored_input",
+]
 PadErrorCode = Literal[
     "unavailable", "status_unverified", "disconnected", "poll_failed",
     "send_failed", "reconnect_failed", "close_failed",
@@ -30,6 +37,24 @@ _RETRY_MAX_SECONDS = 30.0
 _FEEDBACK_SECONDS = 0.3
 
 
+@dataclass(frozen=True, slots=True)
+class InputEvent:
+    """Privacy-bounded disposition for one received vendor HID message."""
+
+    key: InputKey
+    action: InputAction
+    received_at: float
+    connection_ordinal: int
+    owner_at_dispatch: Owner
+    layer_one: bool
+    slot_occupied: bool
+    result: InputResult
+
+
+def _ignore_input_event(_event: InputEvent) -> None:
+    """Default observer: tracing stays completely opt-in."""
+
+
 class PadPort(Protocol):
     connected: bool
     status_verified: bool
@@ -39,6 +64,7 @@ class PadPort(Protocol):
     def status(self, timeout: float = ...) -> dict | None: ...
     def reconnect(self, timeout: float = ...) -> bool: ...
     def poll(self, seconds: float) -> list[dict]: ...
+    def poll_received(self, seconds: float) -> list[pad_module.ReceivedMessage]: ...
     def discard_hid_inputs(self) -> int: ...
     def send(self, message: dict) -> None: ...
     def close(self, flush_seconds: float = ..., *,
@@ -80,6 +106,7 @@ class Daemon:
         frontmost: Callable[[], str | None] = frontmost_bundle_id,
         record_reader: Callable[[Path], list[store.SessionRecord]] = store.read_all,
         pruner: Callable[[Path, set[str] | None, float, float], int] = store.prune,
+        input_observer: Callable[[InputEvent], None] = _ignore_input_event,
     ) -> None:
         self.cfg = cfg
         self.pad: PadPort | None = pad
@@ -90,6 +117,7 @@ class Daemon:
         self._frontmost = frontmost
         self._record_reader = record_reader
         self._pruner = pruner
+        self._input_observer = input_observer
 
         self.owner: Owner = "none"
         self.frontmost_ok = False
@@ -97,10 +125,7 @@ class Daemon:
         self.slots: list[str | None] = [None] * slots.COUNT
         self.effective_states: dict[str, AgentState | None] = {}
         self.effective_reasons: dict[str, SlotReason] = {}
-        self.last_input_result: Literal[
-            "opened", "open_failed", "empty_slot", "ignored_owner",
-            "ignored_layer", "ignored_input",
-        ] | None = None
+        self.last_input_result: InputResult | None = None
         self.session_snapshot = sessions.SessionSnapshot((), False, ())
         self.session_diagnostics: tuple[str, ...] = ()
         self.causes: tuple[str, ...] = ()
@@ -119,6 +144,8 @@ class Daemon:
 
         self._verified_epoch: int | None = None
         self._verified_layer: int | None = None
+        self._observer_connection_epoch: int | None = None
+        self._connection_ordinal = 0
         self._next_status_due = 0.0
         self._needs_reconnect = False
         self._next_retry_due = 0.0
@@ -291,6 +318,9 @@ class Daemon:
             return False
         self._verified_epoch = epoch
         self._verified_layer = layer
+        if epoch != self._observer_connection_epoch:
+            self._observer_connection_epoch = epoch
+            self._connection_ordinal += 1
         self.last_status_at = now
         self._set_pad_error(None)
         self._cause("status")
@@ -390,59 +420,99 @@ class Daemon:
                 self.keys_reclaim_due = now + delay
                 self._cause("vendor_keys")
 
-    def _handle_input(self, message: dict, now: float) -> None:
+    def _observe_input(self, event: InputEvent) -> None:
+        try:
+            self._input_observer(event)
+        except Exception:
+            # Diagnostics are never allowed to change the daemon state machine.
+            pass
+
+    def _handle_input(self, message: dict, now: float, *,
+                      received_at: float, connection_ordinal: int) -> None:
         if message.get("m") != "v.oai.hid":
             return
         params = message.get("p")
-        if not isinstance(params, dict):
-            self.last_input_result = "ignored_input"
-            self._cause("input")
-            return
-        key, action = params.get("k"), params.get("act")
-        if type(key) is not str or key not in {f"AG{i:02d}" for i in range(6)} \
-                or type(action) is not int or action != 1:
-            self.last_input_result = "ignored_input"
-            self._cause("input")
-            return
+        key = params.get("k") if isinstance(params, dict) else None
+        action = params.get("act") if isinstance(params, dict) else None
+        slot_index = (int(key[-2:]) if type(key) is str
+                      and key in {f"AG{i:02d}" for i in range(6)} else None)
+        normalized_key: InputKey = (
+            f"A{slot_index + 1}" if slot_index is not None else "other"  # type: ignore[assignment]
+        )
+        normalized_action: InputAction = (
+            action if type(action) is int and action in {0, 1} else "other"
+        )  # type: ignore[assignment]
+        valid_press = slot_index is not None and normalized_action == 1
 
         # Re-read ownership at dispatch time; an app switch must close the gate.
-        self._refresh_owner()
-        if self.owner != "claude":
-            self.last_input_result = "ignored_owner"
+        if valid_press:
+            self._refresh_owner()
+        owner_at_dispatch = self.owner
+        layer_one = self._gate_layer_one()
+        slot_occupied = (slot_index is not None
+                         and self.slots[slot_index] is not None)
+
+        result: InputResult
+        if not valid_press:
+            result = "ignored_input"
             self._cause("input")
-            return
-        if not self._gate_layer_one():
-            self.last_input_result = "ignored_layer"
+        elif owner_at_dispatch != "claude":
+            result = "ignored_owner"
             self._cause("input")
-            return
-        session_id = self.slots[int(key[-2:])]
-        if session_id is None:
-            self.last_input_result = "empty_slot"
+        elif not layer_one:
+            result = "ignored_layer"
+            self._cause("input")
+        elif not slot_occupied:
+            result = "empty_slot"
             self._feedback_until = now + _FEEDBACK_SECONDS
             self._dirty_ambient = True
             self._cause("input_feedback")
-            return
-        try:
-            opened = bool(self._opener(session_id))
-        except Exception:
-            opened = False
-        if opened:
-            self.last_input_result = "opened"
-            self._cause("input")
-            return
-        self.last_input_result = "open_failed"
-        self._feedback_until = now + _FEEDBACK_SECONDS
-        self._dirty_ambient = True
-        self._cause("input_feedback")
+        else:
+            session_id = self.slots[slot_index]
+            try:
+                opened = bool(self._opener(session_id))
+            except Exception:
+                opened = False
+            if opened:
+                result = "opened"
+                self._cause("input")
+            else:
+                result = "open_failed"
+                self._feedback_until = now + _FEEDBACK_SECONDS
+                self._dirty_ambient = True
+                self._cause("input_feedback")
+
+        self.last_input_result = result
+        self._observe_input(InputEvent(
+            key=normalized_key,
+            action=normalized_action,
+            received_at=received_at,
+            connection_ordinal=connection_ordinal,
+            owner_at_dispatch=owner_at_dispatch,
+            layer_one=layer_one,
+            slot_occupied=slot_occupied,
+            result=result,
+        ))
 
     def _handle_messages(self, messages: object, now: float) -> None:
         if not isinstance(messages, list):
             return
-        for message in messages:
+        for received in messages:
+            if not isinstance(received, pad_module.ReceivedMessage):
+                continue
+            # Metadata from any prior connection is never dispatched.  The
+            # observer sees only a daemon-local ordinal, not Pad's raw epoch.
+            if received.connection_epoch != self._verified_epoch:
+                continue
+            message = received.message
             if not isinstance(message, dict):
                 continue
             self._schedule_reclaim(message, now)
-            self._handle_input(message, now)
+            self._handle_input(
+                message, now,
+                received_at=received.received_at,
+                connection_ordinal=self._connection_ordinal,
+            )
 
     def _key_colours(self) -> tuple[int | None, ...]:
         colours: list[int | None] = []
@@ -562,7 +632,7 @@ class Daemon:
                 # HID callbacks were delivered.  This positive poll is the
                 # daemon's cadence; the CLI must not add another full sleep
                 # while a verified pad is connected.
-                messages = self.pad.poll(self.cfg.poll_ms / 1000.0)
+                messages = self.pad.poll_received(self.cfg.poll_ms / 1000.0)
             except Exception:
                 self._invalidate_pad(
                     reconnect=True, now=now, error_code="poll_failed")
