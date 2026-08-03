@@ -94,7 +94,7 @@ def test_bare_string_is_not_shredded_into_characters(tmp_path: Path):
     p = tmp_path / "config.json"
     p.write_text(json.dumps({"gate": {"yield_to": "com.openai.chat"}}))
     cfg, _ = load(p)
-    assert cfg.yield_to == ("com.openai.chat",)
+    assert cfg.yield_to == ("com.openai.codex",)
 
 
 def test_string_false_does_not_enable_the_option(tmp_path: Path):
@@ -137,4 +137,127 @@ def test_valid_string_list_is_kept(tmp_path: Path):
     p.write_text(json.dumps({"gate": {"yield_to": ["a.b", "c.d"]}}))
     cfg, warnings = load(p)
     assert cfg.yield_to == ("a.b", "c.d")
+    assert warnings == []
+
+
+def test_desktop_defaults_and_status_poll_cadence():
+    cfg, warnings = load(None)
+    assert cfg.own_when == ("com.anthropic.claudefordesktop",)
+    assert cfg.yield_to == ("com.openai.codex",)
+    assert cfg.slots_order == "recent_sticky"
+    assert cfg.status_poll_ms == 1000
+    assert warnings == []
+
+
+def test_ownership_colours_and_effects_use_measured_defaults():
+    cfg, warnings = load(None)
+    assert (cfg.underglow_claude, cfg.underglow_codex) == (0xFF6D00, 0x304FFE)
+    assert (cfg.effect_normal, cfg.effect_alert, cfg.effect_fault) == \
+        ("solid", "blink", "rainbow")
+    assert warnings == []
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("#000000", 0x000000), ("#123456", 0x123456), ("#aBcDeF", 0xABCDEF),
+    (0, 0), (0xFFFFFF, 0xFFFFFF),
+])
+def test_colours_accept_exact_hex_strings_or_rgb_integers(tmp_path: Path, value, expected):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"underglow": {"claude": value}}))
+    cfg, warnings = load(p)
+    assert cfg.underglow_claude == expected
+    assert warnings == []
+
+
+@pytest.mark.parametrize("value", ["123456", "#fff", "##123456", "#12345g", -1, 0x1000000, True])
+def test_bad_colours_fall_back_and_warn(tmp_path: Path, value):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"underglow": {"claude": value}}))
+    cfg, warnings = load(p)
+    assert cfg.underglow_claude == 0xFF6D00
+    assert any("underglow.claude" in warning for warning in warnings)
+
+
+def test_slots_scope_layer_and_timing_values_are_loaded(tmp_path: Path):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({
+        "slots": {"order": "priority"},
+        "layer_gate": {"underglow": "off"},
+        "underglow": {"scope": "all_sessions", "reclaim_delay_ms": 0},
+        "state": {"working_max_seconds": 0},
+        "timing": {"status_poll_ms": 1500},
+    }))
+    cfg, warnings = load(p)
+    assert cfg.slots_order == "priority"
+    assert cfg.layer_underglow == "off"
+    assert cfg.underglow_scope == "all_sessions"
+    assert cfg.reclaim_delay_ms == 0
+    assert cfg.working_max_seconds == 0
+    assert cfg.status_poll_ms == 1500
+    assert warnings == []
+
+
+@pytest.mark.parametrize("section, key, value, expected", [
+    ("slots", "order", "random", "recent_sticky"),
+    ("layer_gate", "underglow", "flash", "keep"),
+    ("underglow", "scope", "current", "outside"),
+])
+def test_new_enum_values_fall_back_and_warn(tmp_path: Path, section, key, value, expected):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({section: {key: value}}))
+    cfg, warnings = load(p)
+    attr = {"order": "slots_order", "underglow": "layer_underglow", "scope": "underglow_scope"}[key]
+    assert getattr(cfg, attr) == expected
+    assert warnings
+
+
+def test_effect_validation_and_semantic_warnings(tmp_path: Path):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({
+        "underglow": {"effects": {"normal": "rainbow", "alert": "rainbow",
+                                      "fault": "sparkle"}}
+    }))
+    cfg, warnings = load(p)
+    assert cfg.effect_normal == "rainbow"
+    assert cfg.effect_alert == "rainbow"
+    assert cfg.effect_fault == "rainbow"
+    assert any("sparkle" in warning for warning in warnings)
+    assert any("same effect" in warning for warning in warnings)
+    assert any("rainbow" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize("section, key, value, default", [
+    ("timing", "status_poll_ms", 0, 1000),
+    ("timing", "status_poll_ms", True, 1000),
+    ("timing", "status_poll_ms", 0.5, 1000),
+    ("underglow", "reclaim_delay_ms", -1, 200),
+    ("state", "working_max_seconds", -1, 900),
+])
+def test_new_numeric_bounds_fall_back_and_warn(tmp_path: Path, section, key, value, default):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({section: {key: value}}))
+    cfg, warnings = load(p)
+    attr = key
+    assert getattr(cfg, attr) == default
+    assert any(key in warning for warning in warnings)
+
+
+def test_new_and_legacy_settings_can_coexist(tmp_path: Path):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({
+        "mod_key": "C4",
+        "tab_switch": {"knob": False, "mod_direct": False},
+        "underglow": {
+            "codex": "#010203",
+            "when_iterm": {"mode": "off"},
+            "when_codex": {"mode": "off"},
+        },
+    }))
+    cfg, warnings = load(p)
+    assert cfg.mod_key == "C4"
+    assert cfg.knob_tab_switch is False
+    assert cfg.mod_direct_tab is False
+    assert cfg.underglow_iterm == "off"
+    assert cfg.legacy_underglow_codex_mode == "off"
+    assert cfg.underglow_codex == 0x010203
     assert warnings == []
