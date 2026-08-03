@@ -148,9 +148,12 @@ USB/BLE protocol과 과거 실기 왕복 근거는 [하드웨어 실측 노트](
 - `paneglow start --timeout 15`가 plist를 다시 bootstrap해 PID 62049를 올렸고, USB v0.4.1
   Layer 1 상태가 복구됐다.
 - uninstall은 daemon과 plist/job을 제거했고, 두 번째 uninstall은 already-uninstalled
-  no-op이었다. 그 뒤 다시 install해 기록 종료 시 PID 63096이 current/loaded 상태였다.
+  no-op이었다. 그 뒤 다시 install해 PID 63096이 current/loaded 상태가 됐다.
 - 최종 `status`, `doctor`, `pip check`가 통과했다. 0.5초 `trace-input`은 빈 이벤트 배열을
   반환했고 request/active/result 임시 파일을 남기지 않았다.
+- 최종 PID 63096을 SIGKILL한 뒤 12초를 기다렸다. launchd의 runs가 1에서 2로 늘고
+  `last terminating signal = Killed: 9`가 기록됐으며, 새 PID 68752가 USB v0.4.1 Layer 1을
+  다시 보고했다. 따라서 정상 stop의 무재실행과 비정상 종료의 자동 복구를 각각 실측했다.
 
 이 실측에는 logout/login 또는 재부팅이 포함되지 않았다. 따라서 다음 로그인에서 별도
 `paneglow start` 없이 올라오는지는 여전히 사용자 입회 검증으로 남는다.
@@ -176,7 +179,7 @@ transport 중복의 원인, 정확한 앱 focus 전환 시각 자체를 이 결�
 
 ## 다시 사용할 때
 
-기록 종료 시 per-user LaunchAgent는 current/loaded였고 PID 63096이 USB Layer 1 패드를
+기록 종료 시 per-user LaunchAgent는 current/loaded였고 PID 68752가 USB Layer 1 패드를
 보고했다. 이 시점 상태를 이후 실행 상태로 단정하지 말고 먼저 다음 명령으로 확인한다.
 
 ```bash
