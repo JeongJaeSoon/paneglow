@@ -79,6 +79,11 @@ _TRANSPORTS = frozenset({"USB", "BLE"})
 _EFFECTS = frozenset({"off", "solid", "spin", "rainbow", "blink", "pulse"})
 _SAFE_TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 _CONFIG_LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_.]{0,127}\Z")
+_TRACE_KEYS = frozenset({"A1", "A2", "A3", "A4", "A5", "A6", "other"})
+_TRACE_REQUEST_TTL_SECONDS = 30.0
+_TRACE_RESULT_TTL_SECONDS = 30.0
+_TRACE_POLL_SECONDS = 0.02
+_TRACE_GRACE_SECONDS = 3.0
 
 
 class RuntimeDataError(ValueError):
@@ -101,6 +106,10 @@ class RuntimePaths:
     lock_path: Path
     pid_path: Path
     snapshot_path: Path
+    trace_lock_path: Path
+    trace_request_path: Path
+    trace_active_path: Path
+    trace_result_path: Path
     log_path: Path
     claude_settings_path: Path
     claude_sessions_dir: Path
@@ -147,6 +156,10 @@ class RuntimePaths:
             lock_path=runtime / "daemon.lock",
             pid_path=runtime / "daemon.pid.json",
             snapshot_path=runtime / "snapshot.json",
+            trace_lock_path=runtime / "trace.lock",
+            trace_request_path=runtime / "trace.request.json",
+            trace_active_path=runtime / "trace.active.json",
+            trace_result_path=runtime / "trace.result.json",
             log_path=home / "logs" / "daemon.log",
             claude_settings_path=claude_settings,
             claude_sessions_dir=claude_sessions,
@@ -169,6 +182,8 @@ class DaemonRuntime(Protocol):
         stop_event: threading.Event,
         publish: Callable[[Mapping[str, Any]], None],
     ) -> None: ...
+
+    def bind_instance(self, identity: InstanceIdentity) -> None: ...
 
     def close(self, flush_seconds: float = ...) -> None: ...
 
@@ -364,6 +379,335 @@ def _validate_instance_id(value: object) -> str:
     if value not in {parsed.hex, str(parsed)}:
         raise RuntimeDataError("instance_id is not canonical")
     return value
+
+
+_TRACE_REQUEST_KEYS = {
+    "schema_version", "request_id", "instance_id", "created_at",
+    "duration_ms", "max_events",
+}
+_TRACE_RESULT_KEYS = {
+    "schema_version", "request_id", "instance_id", "duration_ms",
+    "truncated", "events",
+}
+_TRACE_PUBLIC_KEYS = {"schema_version", "duration_ms", "truncated", "events"}
+_TRACE_EVENT_KEYS = {
+    "sequence", "relative_ms", "key", "action", "owner", "layer_one",
+    "slot_occupied", "result", "connection_ordinal",
+}
+
+
+def _validate_trace_request(value: object) -> dict[str, Any]:
+    request = _exact_object(value, _TRACE_REQUEST_KEYS, "trace request")
+    if _exact_int(request["schema_version"], "schema_version") != _SCHEMA_VERSION:
+        raise RuntimeDataError("unsupported trace request schema")
+    _validate_instance_id(request["request_id"])
+    _validate_instance_id(request["instance_id"])
+    _finite_number(request["created_at"], "created_at")
+    _exact_int(request["duration_ms"], "duration_ms", 1, 10_000)
+    _exact_int(request["max_events"], "max_events", 1, 64)
+    return request
+
+
+def _validate_trace_event(value: object, *, sequence: int,
+                          duration_ms: int,
+                          previous_relative_ms: int = 0) -> dict[str, Any]:
+    event = _exact_object(value, _TRACE_EVENT_KEYS, "trace event")
+    if _exact_int(event["sequence"], "sequence", 1, 64) != sequence:
+        raise RuntimeDataError("trace event sequence is not contiguous")
+    relative_ms = _exact_int(
+        event["relative_ms"], "relative_ms", 0, duration_ms
+    )
+    if relative_ms < previous_relative_ms:
+        raise RuntimeDataError("trace event timestamps are not monotonic")
+    if type(event["key"]) is not str or event["key"] not in _TRACE_KEYS:
+        raise RuntimeDataError("trace event key is unknown")
+    action = event["action"]
+    if not ((type(action) is int and action in {0, 1})
+            or (type(action) is str and action == "other")):
+        raise RuntimeDataError("trace event action is unknown")
+    if type(event["owner"]) is not str or event["owner"] not in _OWNERS:
+        raise RuntimeDataError("trace event owner is unknown")
+    _exact_bool(event["layer_one"], "layer_one")
+    _exact_bool(event["slot_occupied"], "slot_occupied")
+    if type(event["result"]) is not str or event["result"] not in _INPUT_RESULTS:
+        raise RuntimeDataError("trace event result is unknown")
+    _exact_int(
+        event["connection_ordinal"], "connection_ordinal", 1, 1_000_000
+    )
+    return event
+
+
+def _validate_trace_public(value: object) -> dict[str, Any]:
+    result = _exact_object(value, _TRACE_PUBLIC_KEYS, "trace result")
+    if _exact_int(result["schema_version"], "schema_version") != _SCHEMA_VERSION:
+        raise RuntimeDataError("unsupported trace result schema")
+    duration_ms = _exact_int(result["duration_ms"], "duration_ms", 0, 10_000)
+    _exact_bool(result["truncated"], "truncated")
+    events = result["events"]
+    if type(events) is not list or len(events) > 64:
+        raise RuntimeDataError("trace events must be a bounded list")
+    previous_relative_ms = 0
+    for sequence, event in enumerate(events, start=1):
+        checked = _validate_trace_event(
+            event,
+            sequence=sequence,
+            duration_ms=duration_ms,
+            previous_relative_ms=previous_relative_ms,
+        )
+        previous_relative_ms = int(checked["relative_ms"])
+    return result
+
+
+def _validate_trace_result(value: object) -> dict[str, Any]:
+    result = _exact_object(value, _TRACE_RESULT_KEYS, "trace result envelope")
+    _validate_instance_id(result["request_id"])
+    _validate_instance_id(result["instance_id"])
+    _validate_trace_public({
+        "schema_version": result["schema_version"],
+        "duration_ms": result["duration_ms"],
+        "truncated": result["truncated"],
+        "events": result["events"],
+    })
+    return result
+
+
+def _trace_public_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy only the documented trace fields to the command's stdout value."""
+    return _validate_trace_public({
+        "schema_version": result["schema_version"],
+        "duration_ms": result["duration_ms"],
+        "truncated": result["truncated"],
+        "events": result["events"],
+    })
+
+
+def _ensure_trace_parent(path: Path) -> None:
+    """Create once, then require an owner-only, non-symlink runtime directory."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        try:
+            path.mkdir(parents=True, mode=0o700)
+            metadata = path.lstat()
+        except OSError as error:
+            raise RuntimeDataError("trace runtime directory is unavailable") from error
+    except OSError as error:
+        raise RuntimeDataError("trace runtime directory cannot be inspected") from error
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() \
+            or stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise RuntimeDataError("trace runtime directory is not owner-only")
+
+
+def _trace_path_metadata(path: Path) -> os.stat_result | None:
+    try:
+        parent = path.parent.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeDataError("trace runtime directory cannot be inspected") from error
+    if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() \
+            or stat.S_IMODE(parent.st_mode) != 0o700:
+        raise RuntimeDataError("trace runtime directory is not owner-only")
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeDataError("trace runtime path cannot be inspected") from error
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() \
+            or stat.S_IMODE(metadata.st_mode) != 0o600 \
+            or metadata.st_nlink != 1:
+        raise RuntimeDataError("trace runtime path is not a private regular file")
+    return metadata
+
+
+@dataclass(frozen=True)
+class _TraceFile:
+    value: object
+    device: int
+    inode: int
+    modified_at: float
+
+
+def _read_private_trace_json(path: Path) -> _TraceFile:
+    """Read one trace file and retain its inode for compare-before-unlink."""
+    _ensure_trace_parent(path.parent)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) \
+        | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except (OSError, ValueError) as error:
+        raise RuntimeDataError("private trace file is unavailable") from error
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() \
+                or stat.S_IMODE(metadata.st_mode) != 0o600 \
+                or metadata.st_nlink != 1:
+            raise RuntimeDataError("private trace file is unsafe")
+        if metadata.st_size < 0 or metadata.st_size > _MAX_RUNTIME_BYTES:
+            raise RuntimeDataError("private trace file is too large")
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            fd = -1
+            try:
+                value = json.load(
+                    stream,
+                    parse_constant=_reject_json_constant,
+                    object_pairs_hook=_unique_json_object,
+                )
+            except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
+                raise RuntimeDataError("private trace JSON is malformed") from error
+        return _TraceFile(
+            value=value,
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+            modified_at=metadata.st_mtime,
+        )
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _atomic_create_trace_json(path: Path, payload: Mapping[str, Any]) -> None:
+    """Publish one nlink-1 trace file with a cooperative no-replace check.
+
+    The trace directory is 0700 and the CLI/daemon serialize their writes. A
+    hostile same-UID process racing the final check is explicitly out of scope.
+    ``rename`` keeps both the pre-crash temporary and post-crash destination at
+    nlink 1, unlike a link/unlink publication barrier.
+    """
+    _ensure_trace_parent(path.parent)
+    if _trace_path_metadata(path) is not None:
+        raise RuntimeDataError("trace mailbox is already occupied")
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise RuntimeDataError("trace data is not JSON-safe") from error
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            fd = -1
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary_metadata = temporary.lstat()
+        if not stat.S_ISREG(temporary_metadata.st_mode) \
+                or temporary_metadata.st_uid != os.getuid() \
+                or stat.S_IMODE(temporary_metadata.st_mode) != 0o600 \
+                or temporary_metadata.st_nlink != 1:
+            raise RuntimeDataError("trace temporary file is unsafe")
+        # Re-check immediately before the atomic namespace transition. The
+        # cooperative trace lock/active marker excludes another legitimate
+        # writer, so an occupied destination must never be replaced.
+        if _trace_path_metadata(path) is not None:
+            raise RuntimeDataError("trace mailbox became occupied")
+        os.rename(temporary, path)
+        published = _trace_path_metadata(path)
+        if published is None or (published.st_dev, published.st_ino) != (
+            temporary_metadata.st_dev, temporary_metadata.st_ino
+        ):
+            raise RuntimeDataError("trace publication identity changed")
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_fd = os.open(path.parent, directory_flags)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        _trace_path_metadata(path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        temporary.unlink(missing_ok=True)
+
+
+def _cleanup_stale_trace_path(path: Path, *, ttl: float,
+                              now: float | None = None) -> bool:
+    """Remove only an expired owner-private regular trace artifact."""
+    metadata = _trace_path_metadata(path)
+    if metadata is None:
+        return False
+    current = time.time() if now is None else now
+    age = current - metadata.st_mtime
+    if age < -5.0 or age <= ttl:
+        return False
+    # Re-check the inode so a replacement is not unlinked after inspection.
+    current_metadata = _trace_path_metadata(path)
+    if current_metadata is None or (current_metadata.st_dev, current_metadata.st_ino) \
+            != (metadata.st_dev, metadata.st_ino):
+        return False
+    path.unlink()
+    return True
+
+
+def _unlink_trace_inode(path: Path, trace_file: _TraceFile) -> bool:
+    """Claim/remove the exact trace inode that was read, never its replacement."""
+    current = _trace_path_metadata(path)
+    if current is None or (current.st_dev, current.st_ino) != (
+        trace_file.device, trace_file.inode
+    ):
+        return False
+    # Runtime directory mode 0700 excludes cross-UID swaps. A hostile same-UID
+    # peer remains outside the threat model after this final comparison.
+    path.unlink(missing_ok=True)
+    return True
+
+
+def _claim_trace_inode(source: Path, destination: Path,
+                       trace_file: _TraceFile) -> bool:
+    """Atomically rename a request to its active marker at nlink 1.
+
+    Before a crash the source exists; after a crash the destination exists.
+    Cooperative serialization and the 0700 directory make the final absent
+    destination check sufficient; hostile same-UID replacement is out of scope.
+    """
+    if _trace_path_metadata(destination) is not None:
+        return False
+    current = _trace_path_metadata(source)
+    if current is None or (current.st_dev, current.st_ino) != (
+        trace_file.device, trace_file.inode
+    ):
+        return False
+    try:
+        # Repeat the absent check immediately before rename so cooperative
+        # callers never replace one another's active marker.
+        if _trace_path_metadata(destination) is not None:
+            return False
+        os.rename(source, destination)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise RuntimeDataError("trace request could not be claimed") from error
+    claimed = _trace_path_metadata(destination)
+    if claimed is None or (claimed.st_dev, claimed.st_ino) != (
+        trace_file.device, trace_file.inode
+    ):
+        # Preserve whichever name survived for later recovery; never unlink an
+        # inode whose post-rename identity could not be proven.
+        raise RuntimeDataError("trace claim identity changed")
+    return True
+
+
+def _unlink_trace_if_owned(path: Path, *, request_id: str,
+                           instance_id: str, result: bool = False) -> bool:
+    """Unlink a fixed mailbox file only when its validated identity matches."""
+    if _trace_path_metadata(path) is None:
+        return False
+    try:
+        trace_file = _read_private_trace_json(path)
+        value = (_validate_trace_result(trace_file.value) if result
+                 else _validate_trace_request(trace_file.value))
+    except RuntimeDataError:
+        return False
+    if value["request_id"] != request_id or value["instance_id"] != instance_id:
+        return False
+    return _unlink_trace_inode(path, trace_file)
 
 
 _SNAPSHOT_KEYS = {
@@ -570,6 +914,51 @@ class _LifetimeLock:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+class _TraceLock(_LifetimeLock):
+    """Fail-fast trace lock with stricter pre-existing-file validation."""
+
+    def acquire(self, *, blocking: bool = False) -> None:
+        _ensure_trace_parent(self.path.parent)
+        base_flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) \
+            | getattr(os, "O_NOFOLLOW", 0)
+        created = False
+        try:
+            self.fd = os.open(self.path, base_flags | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
+        except FileExistsError:
+            try:
+                self.fd = os.open(self.path, base_flags)
+            except OSError as error:
+                raise RuntimeDataError("trace lock is unavailable") from error
+        except OSError as error:
+            raise RuntimeDataError("trace lock is unavailable") from error
+        try:
+            if created:
+                os.fchmod(self.fd, 0o600)
+            metadata = os.fstat(self.fd)
+            if not stat.S_ISREG(metadata.st_mode) \
+                    or metadata.st_uid != os.getuid() \
+                    or stat.S_IMODE(metadata.st_mode) != 0o600 \
+                    or metadata.st_nlink != 1:
+                raise RuntimeDataError("trace lock is not a private regular file")
+            operation = fcntl.LOCK_EX
+            if not blocking:
+                operation |= fcntl.LOCK_NB
+            fcntl.flock(self.fd, operation)
+        except OSError as error:
+            os.close(self.fd)
+            self.fd = -1
+            if not blocking and error.errno in {
+                errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK
+            }:
+                raise AlreadyRunning("trace lock is already held") from error
+            raise
+        except BaseException:
+            os.close(self.fd)
+            self.fd = -1
+            raise
 
 
 def _lock_is_held(path: Path) -> bool:
@@ -838,6 +1227,225 @@ def _snapshot_from_daemon(daemon: object, generation: int,
     }
 
 
+@dataclass
+class _ActiveTrace:
+    request_id: str
+    instance_id: str
+    started_at: float
+    deadline: float
+    requested_duration_ms: int
+    max_events: int
+    events: list[dict[str, Any]]
+    connection_ordinals: dict[int, int]
+
+
+class _TraceMailbox:
+    """Opt-in, one-shot trace collector owned by the running daemon.
+
+    Merely constructing or polling this object never creates a mailbox file.
+    A capture exists only after a separate CLI process publishes an exact,
+    private request bound to this daemon instance.
+    """
+
+    def __init__(self, paths: RuntimePaths) -> None:
+        self.paths = paths
+        self.instance_id: str | None = None
+        self.active: _ActiveTrace | None = None
+
+    def bind_instance(self, instance_id: str) -> None:
+        self.instance_id = _validate_instance_id(instance_id)
+
+    def _start_request(self, now: float) -> None:
+        if self.instance_id is None or self.active is not None:
+            return
+        _cleanup_stale_trace_path(
+            self.paths.trace_request_path, ttl=_TRACE_REQUEST_TTL_SECONDS
+        )
+        _cleanup_stale_trace_path(
+            self.paths.trace_result_path, ttl=_TRACE_RESULT_TTL_SECONDS
+        )
+        orphan_metadata = _trace_path_metadata(self.paths.trace_active_path)
+        if orphan_metadata is not None:
+            # No in-memory capture owns this marker. Remove the exact safe inode
+            # once regardless of its JSON contents, then admit a new request in
+            # this same poll. Unsafe symlinks/hardlinks fail above and remain.
+            orphan = _TraceFile(
+                value=None,
+                device=orphan_metadata.st_dev,
+                inode=orphan_metadata.st_ino,
+                modified_at=orphan_metadata.st_mtime,
+            )
+            if not _unlink_trace_inode(self.paths.trace_active_path, orphan):
+                return
+        if _trace_path_metadata(self.paths.trace_request_path) is None:
+            return
+        request_metadata = _trace_path_metadata(self.paths.trace_request_path)
+        if request_metadata is None:
+            return
+        claimed_inode = _TraceFile(
+            value=None,
+            device=request_metadata.st_dev,
+            inode=request_metadata.st_ino,
+            modified_at=request_metadata.st_mtime,
+        )
+        # Claim the exact inode under an active marker. This serializes a later
+        # CLI even if the requesting CLI crashes and releases its advisory lock.
+        if not _claim_trace_inode(
+            self.paths.trace_request_path,
+            self.paths.trace_active_path,
+            claimed_inode,
+        ):
+            return
+        try:
+            trace_file = _read_private_trace_json(self.paths.trace_active_path)
+            request = _validate_trace_request(trace_file.value)
+        except BaseException:
+            _unlink_trace_inode(self.paths.trace_active_path, claimed_inode)
+            raise
+        created_at = float(request["created_at"])
+        wall_age = time.time() - created_at
+        if wall_age < -5.0 or wall_age > _TRACE_REQUEST_TTL_SECONDS:
+            _unlink_trace_inode(self.paths.trace_active_path, trace_file)
+            return
+        if request["instance_id"] != self.instance_id:
+            _unlink_trace_inode(self.paths.trace_active_path, trace_file)
+            return
+        duration_ms = int(request["duration_ms"])
+        self.active = _ActiveTrace(
+            request_id=str(request["request_id"]),
+            instance_id=self.instance_id,
+            started_at=now,
+            deadline=now + duration_ms / 1000.0,
+            requested_duration_ms=duration_ms,
+            max_events=int(request["max_events"]),
+            events=[],
+            connection_ordinals={},
+        )
+
+    def _finish(self, finished_at: float, *, truncated: bool) -> None:
+        active = self.active
+        if active is None:
+            return
+        # Clear first so validation or filesystem faults cannot poison every
+        # future observer call with the same capture.
+        self.active = None
+        try:
+            elapsed_ms = int(
+                max(0.0, (finished_at - active.started_at) * 1000.0)
+            )
+            duration_ms = min(active.requested_duration_ms, elapsed_ms)
+            envelope = _validate_trace_result({
+                "schema_version": _SCHEMA_VERSION,
+                "request_id": active.request_id,
+                "instance_id": active.instance_id,
+                "duration_ms": duration_ms,
+                "truncated": truncated,
+                "events": active.events,
+            })
+            _cleanup_stale_trace_path(
+                self.paths.trace_result_path, ttl=_TRACE_RESULT_TTL_SECONDS
+            )
+            existing = _trace_path_metadata(self.paths.trace_result_path)
+            if existing is not None:
+                previous = _validate_trace_result(
+                    _read_private_trace_json(self.paths.trace_result_path).value
+                )
+                if previous["request_id"] == active.request_id \
+                        and previous["instance_id"] == active.instance_id:
+                    return
+                raise RuntimeDataError("another trace result occupies the mailbox")
+            _atomic_create_trace_json(self.paths.trace_result_path, envelope)
+        except BaseException:
+            # The diagnostic result may be lost, but daemon routing continues.
+            pass
+        finally:
+            _unlink_trace_if_owned(
+                self.paths.trace_active_path,
+                request_id=active.request_id,
+                instance_id=active.instance_id,
+            )
+
+    def poll(self, now: float | None = None) -> None:
+        """Accept a request or complete an expired one without escaping errors."""
+        try:
+            current = time.monotonic() if now is None else now
+            if self.active is None:
+                self._start_request(current)
+            active = self.active
+            if active is not None and current >= active.deadline:
+                self._finish(active.deadline, truncated=False)
+        except BaseException:
+            # Tracing is diagnostic-only and must never affect daemon routing.
+            pass
+
+    def observe(self, event: object) -> None:
+        """Collect one already-normalized daemon input disposition."""
+        try:
+            active = self.active
+            if active is None:
+                return
+            received = getattr(event, "received_at")
+            if isinstance(received, bool) or not isinstance(received, (int, float)) \
+                    or not math.isfinite(float(received)):
+                return
+            received_at = float(received)
+            if received_at < active.started_at:
+                return
+            if received_at > active.deadline:
+                self._finish(active.deadline, truncated=False)
+                return
+            raw_ordinal = getattr(event, "connection_ordinal")
+            if type(raw_ordinal) is not int:
+                return
+            ordinal = active.connection_ordinals.get(raw_ordinal)
+            if ordinal is None:
+                ordinal = len(active.connection_ordinals) + 1
+                active.connection_ordinals[raw_ordinal] = ordinal
+            relative_ms = min(
+                active.requested_duration_ms,
+                int((received_at - active.started_at) * 1000.0),
+            )
+            item = {
+                "sequence": len(active.events) + 1,
+                "relative_ms": relative_ms,
+                "key": getattr(event, "key"),
+                "action": getattr(event, "action"),
+                "owner": getattr(event, "owner_at_dispatch"),
+                "layer_one": getattr(event, "layer_one"),
+                "slot_occupied": getattr(event, "slot_occupied"),
+                "result": getattr(event, "result"),
+                "connection_ordinal": ordinal,
+            }
+            _validate_trace_event(
+                item, sequence=len(active.events) + 1,
+                duration_ms=active.requested_duration_ms,
+                previous_relative_ms=(
+                    int(active.events[-1]["relative_ms"])
+                    if active.events else 0
+                ),
+            )
+            active.events.append(item)
+            if len(active.events) >= active.max_events:
+                self._finish(received_at, truncated=True)
+        except BaseException:
+            # An unsafe mailbox or malformed event cannot interfere with input.
+            pass
+
+    def close(self) -> None:
+        """Remove only this instance's active request; never synthesize success."""
+        active, self.active = self.active, None
+        if active is None:
+            return
+        try:
+            _unlink_trace_if_owned(
+                self.paths.trace_active_path,
+                request_id=active.request_id,
+                instance_id=active.instance_id,
+            )
+        except BaseException:
+            pass
+
+
 class _DefaultRuntime:
     def __init__(self, cfg: object, paths: RuntimePaths) -> None:
         # This is the only lifecycle/daemon coupling point.  Keeping it lazy
@@ -845,6 +1453,7 @@ class _DefaultRuntime:
         from paneglow import daemon as daemon_module, deeplink, sessions
 
         self.cfg = cfg
+        self.trace_mailbox = _TraceMailbox(paths)
         self.daemon = daemon_module.Daemon(
             cfg,
             state_root=paths.state_dir,
@@ -852,19 +1461,28 @@ class _DefaultRuntime:
             opener=lambda session_id: deeplink.open_session(
                 session_id, (paths.mapping_dir,)
             ),
+            input_observer=self.trace_mailbox.observe,
         )
         self.generation = 0
         self.last_status_at: float | None = None
+
+    def bind_instance(self, identity: InstanceIdentity) -> None:
+        self.trace_mailbox.bind_instance(identity.instance_id)
 
     def run(self, stop_event: threading.Event,
             publish: Callable[[Mapping[str, Any]], None]) -> None:
         interval = max(0.001, getattr(self.cfg, "poll_ms", 250) / 1000.0)
         while not stop_event.is_set():
+            trace_mailbox = getattr(self, "trace_mailbox", None)
+            if trace_mailbox is not None:
+                trace_mailbox.poll()
             # Session records and Claude's mapping files use Unix epoch time.
             # The daemon also uses this value for retry deadlines, so every
             # comparison must stay in the same clock domain.
             now = time.time()
             self.daemon.tick(now)
+            if trace_mailbox is not None:
+                trace_mailbox.poll()
             self.generation += 1
             pad = getattr(self.daemon, "pad", None)
             if bool(getattr(pad, "status_verified", False)):
@@ -884,6 +1502,9 @@ class _DefaultRuntime:
         # Daemon.close delegates to Pad.close(), whose default performs the
         # measured flush.  The adapter accepts the explicit lifecycle contract
         # even though the deterministic daemon intentionally has no CLI concern.
+        trace_mailbox = getattr(self, "trace_mailbox", None)
+        if trace_mailbox is not None:
+            trace_mailbox.close()
         self.daemon.close()
 
     def snapshot(self) -> dict[str, Any]:
@@ -962,6 +1583,9 @@ def _cmd_run(paths: RuntimePaths, *, stdout: TextIO | None = None,
                 transition.close()
                 cfg, _warnings = _load_config(paths)
                 runtime = _runtime_factory(cfg, paths)
+                bind_instance = getattr(runtime, "bind_instance", None)
+                if callable(bind_instance):
+                    bind_instance(identity)
 
                 def publish(payload: Mapping[str, Any]) -> None:
                     nonlocal latest
@@ -1315,6 +1939,171 @@ def _cmd_status(paths: RuntimePaths, *, stdout: TextIO | None = None,
     return 0
 
 
+def _valid_trace_bounds(seconds: object, max_events: object) -> bool:
+    return (
+        not isinstance(seconds, bool)
+        and isinstance(seconds, (int, float))
+        and math.isfinite(float(seconds))
+        and 0 < float(seconds) <= 10
+        and type(max_events) is int
+        and 1 <= max_events <= 64
+    )
+
+
+def _cmd_trace_input(paths: RuntimePaths, seconds: float, max_events: int, *,
+                     stdout: TextIO | None = None,
+                     stderr: TextIO | None = None) -> int:
+    """Request one bounded input trace from the already-running daemon."""
+    stdout = sys.stdout if stdout is None else stdout
+    stderr = sys.stderr if stderr is None else stderr
+    if not _valid_trace_bounds(seconds, max_events):
+        print(
+            "paneglow: trace bounds require 0 < seconds <= 10 and 1 <= max-events <= 64",
+            file=stderr,
+        )
+        return 2
+    trace_lock = _TraceLock(paths.trace_lock_path)
+    try:
+        trace_lock.acquire()
+    except AlreadyRunning:
+        print("paneglow: another input trace is already running", file=stderr)
+        return 1
+    except (OSError, RuntimeDataError):
+        print("paneglow: trace runtime state is unsafe", file=stderr)
+        return 1
+
+    request_id = uuid.uuid4().hex
+    instance_id = ""
+    request_created_at = time.time()
+    status_poll_ms = 1000
+    try:
+        try:
+            cfg, _warnings = _load_config(paths)
+            status_poll_ms = getattr(cfg, "status_poll_ms", 1000)
+            identity, _snapshot = _runtime_identity(
+                paths, status_poll_ms=status_poll_ms
+            )
+            instance_id = identity.instance_id
+            _cleanup_stale_trace_path(
+                paths.trace_request_path, ttl=_TRACE_REQUEST_TTL_SECONDS
+            )
+            _cleanup_stale_trace_path(
+                paths.trace_result_path, ttl=_TRACE_RESULT_TTL_SECONDS
+            )
+            if _trace_path_metadata(paths.trace_active_path) is not None:
+                active_file = _read_private_trace_json(paths.trace_active_path)
+                active_request = _validate_trace_request(active_file.value)
+                if active_request["instance_id"] == instance_id:
+                    raise RuntimeDataError("trace capture is active")
+                if not _unlink_trace_inode(paths.trace_active_path, active_file):
+                    raise RuntimeDataError("trace active marker changed")
+            if _trace_path_metadata(paths.trace_request_path) is not None:
+                raise RuntimeDataError("trace mailbox is occupied")
+            # Under the sole client lock, consume a completed result abandoned
+            # by a client that exited before reading it. Never replace it blind.
+            if _trace_path_metadata(paths.trace_result_path) is not None:
+                prior_file = _read_private_trace_json(paths.trace_result_path)
+                _validate_trace_result(prior_file.value)
+                if not _unlink_trace_inode(paths.trace_result_path, prior_file):
+                    raise RuntimeDataError("prior trace result changed")
+            duration_ms = max(1, int(math.ceil(seconds * 1000.0)))
+            request = _validate_trace_request({
+                "schema_version": _SCHEMA_VERSION,
+                "request_id": request_id,
+                "instance_id": instance_id,
+                "created_at": request_created_at,
+                "duration_ms": duration_ms,
+                "max_events": max_events,
+            })
+            _atomic_create_trace_json(paths.trace_request_path, request)
+        except (OSError, RuntimeDataError):
+            print("paneglow: could not start a verified input trace", file=stderr)
+            return 1
+
+        deadline = time.monotonic() + seconds + _TRACE_GRACE_SECONDS
+        while True:
+            try:
+                if _trace_path_metadata(paths.trace_result_path) is not None:
+                    trace_file = _read_private_trace_json(paths.trace_result_path)
+                    result = _validate_trace_result(trace_file.value)
+                    if result["request_id"] != request_id \
+                            or result["instance_id"] != instance_id \
+                            or trace_file.modified_at + 1.0 < request_created_at \
+                            or result["duration_ms"] > duration_ms \
+                            or len(result["events"]) > max_events \
+                            or (result["truncated"]
+                                and len(result["events"]) != max_events):
+                        raise RuntimeDataError("trace result identity is invalid")
+                    public = _trace_public_result(result)
+                    if not _unlink_trace_inode(paths.trace_result_path, trace_file):
+                        raise RuntimeDataError("trace result changed while reading")
+                    _unlink_trace_if_owned(
+                        paths.trace_request_path,
+                        request_id=request_id,
+                        instance_id=instance_id,
+                    )
+                    print(
+                        json.dumps(
+                            public,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        file=stdout,
+                    )
+                    return 0
+                current, _snapshot = _runtime_identity(
+                    paths, status_poll_ms=status_poll_ms, allow_stale=True
+                )
+                if current.instance_id != instance_id:
+                    raise RuntimeDataError("daemon instance changed")
+            except (OSError, RuntimeDataError):
+                print("paneglow: input trace did not complete safely", file=stderr)
+                return 1
+            if time.monotonic() >= deadline:
+                print("paneglow: input trace timed out", file=stderr)
+                return 1
+            time.sleep(_TRACE_POLL_SECONDS)
+    finally:
+        if instance_id:
+            try:
+                _unlink_trace_if_owned(
+                    paths.trace_request_path,
+                    request_id=request_id,
+                    instance_id=instance_id,
+                )
+                _unlink_trace_if_owned(
+                    paths.trace_result_path,
+                    request_id=request_id,
+                    instance_id=instance_id,
+                    result=True,
+                )
+                # Once the verified daemon is gone or has a new identity, its
+                # old in-memory capture cannot still own this active marker.
+                cleanup_active = not _lock_is_held(paths.lock_path)
+                if not cleanup_active:
+                    try:
+                        current, _snapshot = _runtime_identity(
+                            paths,
+                            status_poll_ms=status_poll_ms,
+                            allow_stale=True,
+                        )
+                    except RuntimeDataError:
+                        current = None
+                    cleanup_active = current is not None \
+                        and current.instance_id != instance_id
+                if cleanup_active:
+                    _unlink_trace_if_owned(
+                        paths.trace_active_path,
+                        request_id=request_id,
+                        instance_id=instance_id,
+                    )
+            except BaseException:
+                pass
+        trace_lock.close()
+
+
 def _hook_command() -> str:
     return shlex.join((*_absolute_command_prefix(), "hook"))
 
@@ -1664,6 +2453,11 @@ def _build_parser():
     stop = commands.add_parser("stop", help="stop the verified daemon with SIGTERM")
     stop.add_argument("--timeout", type=float, default=5.0)
     commands.add_parser("status", help="read the daemon runtime snapshot")
+    trace = commands.add_parser(
+        "trace-input", help="capture a bounded, privacy-safe input trace"
+    )
+    trace.add_argument("--seconds", type=float, default=5.0)
+    trace.add_argument("--max-events", type=int, default=32)
     commands.add_parser("doctor", help="check configuration and integration")
     commands.add_parser("install-hooks", help="merge all Claude hook events")
     return parser
@@ -1690,6 +2484,14 @@ def main(argv: list[str] | None = None) -> int:
         print("paneglow: --timeout must be a finite non-negative number",
               file=sys.stderr)
         return 2
+    if parsed.command == "trace-input" and not _valid_trace_bounds(
+        parsed.seconds, parsed.max_events
+    ):
+        print(
+            "paneglow: trace bounds require 0 < seconds <= 10 and 1 <= max-events <= 64",
+            file=sys.stderr,
+        )
+        return 2
 
     paths = RuntimePaths.from_env()
     if parsed.command == "run":
@@ -1700,6 +2502,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_stop(paths, parsed.timeout)
     if parsed.command == "status":
         return _cmd_status(paths)
+    if parsed.command == "trace-input":
+        return _cmd_trace_input(paths, parsed.seconds, parsed.max_events)
     if parsed.command == "doctor":
         return _cmd_doctor(paths)
     if parsed.command == "install-hooks":
