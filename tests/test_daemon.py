@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import FrozenInstanceError, dataclass, fields
 from pathlib import Path
 
 import pytest
 
-from paneglow import daemon, protocol, sessions, store
+from paneglow import daemon, pad as pad_module, protocol, sessions, store
 from paneglow.config import Config
 from paneglow.state import AgentState
 
@@ -80,13 +81,23 @@ class FakePad:
         return True
 
     def poll(self, seconds):
+        return [received.message for received in self.poll_received(seconds)]
+
+    def poll_received(self, seconds):
         self.poll_durations.append(seconds)
         if self.on_poll is not None:
             self.on_poll()
         if self.fail_poll:
             raise RuntimeError("poll failed")
         messages, self.messages = self.messages, []
-        return messages
+        return [
+            message if isinstance(message, pad_module.ReceivedMessage)
+            else pad_module.ReceivedMessage(
+                message=message, received_at=0.0,
+                connection_epoch=self.epoch,
+            )
+            for message in messages
+        ]
 
     def send(self, message):
         self.writes.append(message)
@@ -110,10 +121,13 @@ class FakePad:
 def build(
     *, cfg=Config(), pad=None, frontmost=CLAUDE,
     snapshot=None, records=(), opener=lambda _sid: True,
-    prunes=None, factory=lambda: None,
+    prunes=None, factory=lambda: None, input_observer=None,
 ):
     snapshot = snapshot or sessions.SessionSnapshot((), True, ())
     prunes = [] if prunes is None else prunes
+    kwargs = {}
+    if input_observer is not None:
+        kwargs["input_observer"] = input_observer
     return daemon.Daemon(
         cfg, pad,
         state_root=Path("/unused"),
@@ -125,6 +139,7 @@ def build(
         frontmost=(lambda: frontmost) if not isinstance(frontmost, Box)
         else (lambda: frontmost.value),
         opener=opener,
+        **kwargs,
     )
 
 
@@ -138,6 +153,13 @@ def on_next_poll(pad: FakePad, *messages: object) -> None:
         pad.messages.extend(messages)
 
     pad.on_poll = deliver
+
+
+def received(message: object, received_at: float, connection: int = 1):
+    return pad_module.ReceivedMessage(
+        message=message, received_at=received_at,
+        connection_epoch=connection,
+    )
 
 
 @pytest.mark.parametrize(
@@ -248,6 +270,133 @@ def test_startup_status_layer_one_then_valid_agent_input_opens_slot():
     assert d.last_input_result == "opened"
     assert d.verified_layer == 1
     assert p.poll_durations == [pytest.approx(Config().poll_ms / 1000.0)]
+
+
+def test_observer_keeps_same_poll_order_receive_times_and_event_dispositions():
+    p = FakePad([1], epoch=41)
+    front = Box(CLAUDE)
+    observed: list[daemon.InputEvent] = []
+    opened: list[str] = []
+    snapshot = sessions.SessionSnapshot(
+        (live("s1", 1), live("s2", 2)), True, ())
+    messages = [
+        {"m": "v.oai.hid", "p": {"k": "AG00", "act": 1}},
+        {"m": "v.oai.hid", "p": {"k": "AG01", "act": 1}},
+        {"m": "v.oai.hid", "p": {"k": "AG01", "act": 1}},
+        {"m": "v.oai.hid", "p": {"k": "AG01", "act": 0}},
+    ]
+    timestamps = [12.0, 12.03, 12.08, 12.11]
+    on_next_poll(p, *[
+        received(message, timestamp, connection=41)
+        for message, timestamp in zip(messages, timestamps, strict=True)
+    ])
+
+    def blocking_open(session_id: str) -> bool:
+        opened.append(session_id)
+        time.sleep(0.01)
+        front.value = CODEX
+        return True
+
+    d = build(
+        pad=p, frontmost=front, snapshot=snapshot,
+        opener=blocking_open, input_observer=observed.append,
+    )
+    d.tick(20.0)
+
+    assert opened == [d.slots[0]]
+    assert [event.key for event in observed] == ["A1", "A2", "A2", "A2"]
+    assert [event.action for event in observed] == [1, 1, 1, 0]
+    assert [event.received_at for event in observed] == timestamps
+    assert [event.connection_ordinal for event in observed] == [1, 1, 1, 1]
+    assert [event.owner_at_dispatch for event in observed] == [
+        "claude", "codex", "codex", "codex",
+    ]
+    assert [event.result for event in observed] == [
+        "opened", "ignored_owner", "ignored_owner", "ignored_input",
+    ]
+    assert all(event.layer_one for event in observed)
+    assert all(event.slot_occupied for event in observed)
+    assert d.last_input_result == "ignored_input"
+
+
+def test_input_event_is_fixed_shape_immutable_and_privacy_bounded():
+    assert [field.name for field in fields(daemon.InputEvent)] == [
+        "key", "action", "received_at", "connection_ordinal",
+        "owner_at_dispatch", "layer_one", "slot_occupied", "result",
+    ]
+    event = daemon.InputEvent(
+        key="other", action="other", received_at=1.0,
+        connection_ordinal=1, owner_at_dispatch="none",
+        layer_one=False, slot_occupied=False, result="ignored_input",
+    )
+    assert not hasattr(event, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        event.result = "opened"
+
+
+def test_default_observer_is_off_and_observer_failures_do_not_stop_dispatch():
+    press = {"m": "v.oai.hid", "p": {"k": "AG00", "act": 1}}
+    snapshot = sessions.SessionSnapshot((live("s1", 1),), True, ())
+
+    default_pad = FakePad([1])
+    on_next_poll(default_pad, press)
+    default = build(pad=default_pad, snapshot=snapshot)
+    default.tick(0)
+    assert default.last_input_result == "opened"
+
+    calls: list[daemon.InputEvent] = []
+    opened: list[str] = []
+
+    def broken_observer(event: daemon.InputEvent) -> None:
+        calls.append(event)
+        raise RuntimeError("trace sink unavailable")
+
+    failing_pad = FakePad([1])
+    on_next_poll(failing_pad, press, press)
+    failing = build(
+        pad=failing_pad, snapshot=snapshot,
+        opener=lambda session_id: opened.append(session_id) or True,
+        input_observer=broken_observer,
+    )
+    failing.tick(0)
+    assert len(calls) == 2
+    assert opened == ["s1", "s1"]
+    assert failing.last_input_result == "opened"
+
+
+def test_observer_normalizes_untrusted_key_and_action_without_raw_payload():
+    p = FakePad([1])
+    observed: list[daemon.InputEvent] = []
+    on_next_poll(
+        p,
+        {"m": "v.oai.hid", "p": {"k": "C1", "act": 1}},
+        {"m": "v.oai.hid", "p": {"k": "AG00", "act": True}},
+        {"m": "v.oai.hid", "p": []},
+    )
+    d = build(pad=p, input_observer=observed.append)
+    d.tick(0)
+    assert [(event.key, event.action, event.result) for event in observed] == [
+        ("other", 1, "ignored_input"),
+        ("A1", "other", "ignored_input"),
+        ("other", "other", "ignored_input"),
+    ]
+
+
+def test_observer_connection_ordinal_changes_on_reconnect_without_raw_epoch():
+    p = FakePad([1], epoch=17)
+    observed: list[daemon.InputEvent] = []
+    press = {"m": "v.oai.hid", "p": {"k": "AG00", "act": 1}}
+    on_next_poll(p, received(press, 1.0, connection=17))
+    d = build(pad=p, input_observer=observed.append)
+    d.tick(0)
+
+    p.connected = False
+    p.reconnect_layers = [1]
+    on_next_poll(p, received(press, 2.0, connection=18))
+    d.tick(1)
+
+    assert [event.connection_ordinal for event in observed] == [1, 2]
+    assert [event.received_at for event in observed] == [1.0, 2.0]
 
 
 @pytest.mark.parametrize(

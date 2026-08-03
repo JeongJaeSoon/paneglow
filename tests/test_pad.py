@@ -3,7 +3,7 @@ from __future__ import annotations
 import gc
 import inspect
 import threading
-from dataclasses import dataclass
+from dataclasses import FrozenInstanceError, dataclass, fields
 
 import pytest
 
@@ -375,6 +375,63 @@ def test_poll_services_runloop_and_decodes_input_report():
     assert pumps and sum(event[1] for event in pumps) == pytest.approx(0.1)
 
 
+def test_poll_received_preserves_report_order_times_and_fixed_metadata_shape():
+    device, backend = open_fake()
+    messages = [
+        {"m": "v.oai.hid", "p": {"k": "AG00", "act": 1}},
+        {"m": "v.oai.hid", "p": {"k": "AG01", "act": 1}},
+        {"m": "v.oai.hid", "p": {"k": "AG01", "act": 1}},
+        {"m": "v.oai.hid", "p": {"k": "AG01", "act": 0}},
+    ]
+    received_at = [101.0, 101.04, 101.09, 101.12]
+
+    for message, timestamp in zip(messages, received_at, strict=True):
+        reports = protocol.frame(message, protocol.USB)
+        assert len(reports) == 1
+        backend.clock.now = timestamp
+        backend.on_report(0, pad.REPORT_ID, reports[0])
+
+    received = device.poll_received(0)
+    assert [item.message for item in received] == messages
+    assert [item.received_at for item in received] == received_at
+    assert {item.connection_epoch for item in received} == {device.epoch}
+    assert [field.name for field in fields(pad.ReceivedMessage)] == [
+        "message", "received_at", "connection_epoch",
+    ]
+    assert not hasattr(received[0], "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        received[0].received_at = 999.0
+
+
+def test_poll_received_uses_the_last_fragment_time_for_multi_report_json():
+    device, backend = open_fake()
+    message = {
+        "m": "v.oai.hid",
+        "p": {"k": "AG00", "act": 1, "padding": "x" * 180},
+    }
+    reports = protocol.frame(message, protocol.USB)
+    assert len(reports) > 1
+
+    for index, report in enumerate(reports):
+        backend.clock.now = 200.0 + index * 0.025
+        backend.on_report(0, pad.REPORT_ID, report)
+
+    received = device.poll_received(0)
+    assert [item.message for item in received] == [message]
+    assert received[0].received_at == pytest.approx(
+        200.0 + (len(reports) - 1) * 0.025)
+    assert received[0].connection_epoch == device.epoch
+
+
+def test_legacy_poll_still_returns_plain_decoded_dicts():
+    device, backend = open_fake()
+    message = {"m": "v.oai.hid", "p": {"k": "AG00", "act": 1}}
+    backend.queue_message(message)
+    result = device.poll(0)
+    assert result == [message]
+    assert type(result[0]) is dict
+
+
 def test_non_vendor_report_id_is_ignored():
     device, backend = open_fake()
     report = protocol.frame({"m": "foreign"}, protocol.USB)[0]
@@ -485,6 +542,35 @@ def test_discard_hid_inputs_drops_prearm_keys_but_preserves_vendor_ack():
     assert device.poll(0) == [ack]
 
 
+def test_status_request_and_discard_preserve_unrelated_envelope_metadata():
+    backend = FakeBackend()
+    key = {"m": "v.oai.hid", "p": {"k": "AG00", "act": 1}}
+    ack = {"result": {"ok": 1}, "id": 7, "method": "v.oai.rgbcfg"}
+
+    def scripted(request):
+        return [
+            key,
+            ack,
+            {
+                "result": {"version": "test", "layer_index": 1},
+                "id": request["id"], "method": "device.status",
+            },
+        ]
+
+    backend.status_script = scripted
+    device, backend = open_fake(backend)
+    assert device.status(timeout=0.2) is not None
+    callback_time = backend.clock.now
+
+    # request/status consumed only their matching reply.  The pre-arm key and
+    # unrelated ACK retain callback-time metadata until the explicit discard.
+    assert device.discard_hid_inputs() == 1
+    remaining = device.poll_received(0)
+    assert [item.message for item in remaining] == [ack]
+    assert remaining[0].received_at == callback_time
+    assert remaining[0].connection_epoch == device.epoch
+
+
 def test_non_string_firmware_is_not_preserved_but_layer_stays_verified():
     backend = FakeBackend()
     backend.status_script = lambda request: [{
@@ -589,6 +675,25 @@ def test_runloop_pump_error_invalidates_connection_and_verified_layer():
     assert device.firmware_version is None
 
 
+def test_callback_clock_error_surfaces_from_next_poll_received_not_callback():
+    device, backend = open_fake()
+    report = protocol.frame(
+        {"m": "v.oai.hid", "p": {"k": "AG00", "act": 1}},
+        protocol.USB,
+    )[0]
+
+    def broken_clock():
+        raise RuntimeError("clock unavailable")
+
+    device._clock = broken_clock
+    # ctypes callbacks cannot propagate Python exceptions.  _on_report records
+    # the failure for the owner thread instead.
+    backend.on_report(0, pad.REPORT_ID, report)
+    with pytest.raises(pad.PadError, match="input callback failed: clock unavailable"):
+        device.poll_received(0)
+    assert device.connected is False
+
+
 def test_reconnect_gets_new_epoch_and_is_usable_only_after_status_round_trip():
     backend = FakeBackend()
     backend.auto_status = True
@@ -600,6 +705,55 @@ def test_reconnect_gets_new_epoch_and_is_usable_only_after_status_round_trip():
     assert device.connected is True and device.status_verified is True
     assert device.layer_index == 1 and device.firmware_version == "test"
     assert backend.events.count("register") == 2
+
+
+def test_reconnect_metadata_uses_new_epoch_and_rejects_stale_callback():
+    backend = FakeBackend()
+    backend.auto_status = True
+    device, backend = open_fake(backend)
+    message = {"m": "v.oai.hid", "p": {"k": "AG00", "act": 1}}
+    report = protocol.frame(message, protocol.USB)[0]
+
+    old_callback = backend.on_report
+    backend.clock.now = 300.0
+    old_callback(0, pad.REPORT_ID, report)
+    first = device.poll_received(0)
+    old_epoch = first[0].connection_epoch
+
+    backend.remove()
+    assert device.reconnect(timeout=0.2) is True
+    assert device.epoch > old_epoch
+
+    backend.clock.now = 301.0
+    old_callback(0, pad.REPORT_ID, report)
+    backend.clock.now = 302.0
+    backend.on_report(0, pad.REPORT_ID, report)
+    second = device.poll_received(0)
+
+    assert [(item.received_at, item.connection_epoch) for item in second] == [
+        (302.0, device.epoch),
+    ]
+
+
+def test_reconnect_ignores_delayed_removal_from_old_registration():
+    backend = FakeBackend()
+    backend.auto_status = True
+    device, backend = open_fake(backend)
+    old_removal_callback = backend.on_remove
+
+    backend.remove()
+    assert device.reconnect(timeout=0.2) is True
+    new_epoch = device.epoch
+    assert device.connected is True
+    assert device.status_verified is True
+    assert device.layer_index == 1
+
+    old_removal_callback(0)
+
+    assert device.epoch == new_epoch
+    assert device.connected is True
+    assert device.status_verified is True
+    assert device.layer_index == 1
 
 
 def test_reconnect_preserves_valid_layer_two_for_daemon_to_gate_later():

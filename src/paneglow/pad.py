@@ -111,6 +111,27 @@ class _Registration:
     mode: Any
 
 
+@dataclass(frozen=True, slots=True)
+class ReceivedMessage:
+    """One decoded message plus fixed-shape receive metadata.
+
+    The envelope is immutable and deliberately has no extensible metadata map.
+    ``message`` remains the decoded dictionary so :meth:`Pad.poll` can preserve
+    its historical ``list[dict]`` contract without copying or reshaping it.
+    """
+
+    message: dict
+    received_at: float
+    connection_epoch: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ReceivedReport:
+    report: bytes
+    received_at: float
+    connection_epoch: int
+
+
 class _PadBackend(Protocol):
     def acquire(self, vid: int, pid: int) -> _AcquiredDevice | None: ...
 
@@ -492,8 +513,8 @@ class Pad:
         self._device: Any | None = None
         self._registration: _Registration | None = None
         self._decoder = protocol.FrameDecoder()
-        self._raw_reports: deque[bytes] = deque()
-        self._messages: list[dict] = []
+        self._raw_reports: deque[_ReceivedReport] = deque()
+        self._messages: list[ReceivedMessage] = []
         self._callback_error: PadError | None = None
         self._removal_result: int | None = None
         self._connected = False
@@ -577,8 +598,13 @@ class Pad:
                 normalized = protocol.normalize_transport(acquired.raw_transport)
             except ValueError as error:
                 raise PadTransportError(str(error)) from error
+            connection_epoch = _next(_epoch_counter)
             registration = self._backend.register(
-                acquired.device, self._on_report, self._on_remove)
+                acquired.device,
+                lambda result, report_id, report: self._on_report(
+                    connection_epoch, result, report_id, report),
+                lambda result: self._on_remove(connection_epoch, result),
+            )
         except BaseException:
             self._connected = False
             self._invalidate_status()
@@ -599,10 +625,11 @@ class Pad:
         self._connected = True
         self._closed = False
         self._invalidate_status()
-        self.epoch = _next(_epoch_counter)
+        self.epoch = connection_epoch
         return True
 
-    def _on_report(self, result: int, report_id: int, report: bytes) -> None:
+    def _on_report(self, connection_epoch: int, result: int,
+                   report_id: int, report: bytes) -> None:
         # This callback is scheduled on the owner run loop.  Still verify it:
         # an accidental backend/thread change must fail closed, not race queues.
         if threading.get_ident() != self._owner_thread:
@@ -610,6 +637,10 @@ class Pad:
                 "input callback ran outside the owner run loop")
             self._connected = False
             self._invalidate_status()
+            return
+        # Registration callbacks close over their connection.  A callback that
+        # somehow survives teardown must not contaminate the current decoder.
+        if connection_epoch != self.epoch:
             return
         if result != 0:
             self._callback_error = PadIOError("input callback", result)
@@ -619,13 +650,22 @@ class Pad:
         if report_id != REPORT_ID:
             return
         try:
-            self._raw_reports.append(bytes(report))
+            received_at = float(self._clock())
+            self._raw_reports.append(_ReceivedReport(
+                report=bytes(report),
+                received_at=received_at,
+                connection_epoch=connection_epoch,
+            ))
         except BaseException as error:
             self._callback_error = _wrapped_error("input callback", error)
             self._connected = False
             self._invalidate_status()
 
-    def _on_remove(self, result: int) -> None:
+    def _on_remove(self, connection_epoch: int, result: int) -> None:
+        # A delayed removal from a disposed registration says nothing about the
+        # current device and must not invalidate its connection or status.
+        if connection_epoch != self.epoch:
+            return
         if threading.get_ident() != self._owner_thread:
             self._callback_error = PadThreadError(
                 "removal callback ran outside the owner run loop")
@@ -665,14 +705,21 @@ class Pad:
 
     def _drain_reports(self) -> None:
         while self._raw_reports:
-            decoded = self._decoder.feed(self._raw_reports.popleft())
+            received_report = self._raw_reports.popleft()
+            decoded = self._decoder.feed(received_report.report)
             # JSON scalars and arrays are syntactically valid, so the framing
             # decoder quite reasonably returns them.  The vendor protocol is
             # object-shaped, though, and every consumer calls ``.get``.  Drop
             # non-objects at this trust boundary instead of letting malformed
             # device traffic take the daemon down.
             self._messages.extend(
-                message for message in decoded if isinstance(message, dict))
+                ReceivedMessage(
+                    message=message,
+                    received_at=received_report.received_at,
+                    connection_epoch=received_report.connection_epoch,
+                )
+                for message in decoded if isinstance(message, dict)
+            )
 
     def _pump_for(self, seconds: float, *, stop_on_disconnect: bool,
                   surface_callback_error: bool) -> None:
@@ -704,8 +751,8 @@ class Pad:
             if duration == 0:
                 break
 
-    def poll(self, seconds: float) -> list[dict]:
-        """Run the owner's CFRunLoop for ``seconds`` and return queued messages."""
+    def poll_received(self, seconds: float) -> list[ReceivedMessage]:
+        """Run the CFRunLoop and return messages with callback-time metadata."""
         self._assert_owner_thread()
         if seconds < 0:
             raise ValueError("seconds must be non-negative")
@@ -715,6 +762,10 @@ class Pad:
             seconds, stop_on_disconnect=True, surface_callback_error=True)
         messages, self._messages = self._messages, []
         return messages
+
+    def poll(self, seconds: float) -> list[dict]:
+        """Run the owner's CFRunLoop and return decoded dictionaries."""
+        return [received.message for received in self.poll_received(seconds)]
 
     def discard_hid_inputs(self) -> int:
         """Drop key events queued before a daemon status-verification boundary.
@@ -727,8 +778,8 @@ class Pad:
         self._drain_reports()
         before = len(self._messages)
         self._messages = [
-            message for message in self._messages
-            if message.get("m") != "v.oai.hid"
+            received for received in self._messages
+            if received.message.get("m") != "v.oai.hid"
         ]
         return before - len(self._messages)
 
@@ -744,9 +795,11 @@ class Pad:
         return type(reply_method) is str and reply_method == method
 
     def _take_reply(self, request_id: int, method: str | None) -> dict | None:
-        for index, message in enumerate(self._messages):
+        for index, received in enumerate(self._messages):
+            message = received.message
             if self._matches_reply(message, request_id, method):
-                return self._messages.pop(index)
+                self._messages.pop(index)
+                return message
         return None
 
     def request(self, message: dict, timeout: float = 3.0) -> dict | None:
