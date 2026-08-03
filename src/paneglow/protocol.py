@@ -11,11 +11,36 @@ import json
 USB = "USB"
 BLE = "BLE"
 
+
+def normalize_transport(value: str | None) -> str:
+    """Normalize an IOKit Transport property to a framing constant.
+
+    Measured IOKit values are ``USB`` and ``Bluetooth Low Energy``. Unknown
+    values must fail closed because choosing the wrong framing still reports a
+    successful write while the device silently drops the packet.
+    """
+    text = (value or "").strip().casefold()
+    if text in {"bluetooth low energy", "ble"}:
+        return BLE
+    if text == "usb":
+        return USB
+    raise ValueError(f"unknown transport: {value!r}")
+
+
 _METHOD_THSTATUS = "v.oai.thstatus"
 _METHOD_RGBCFG = "v.oai.rgbcfg"
 
-_EFFECT_OFF = 0
-_EFFECT_SOLID = 1
+#: Effect values measured on firmware v0.4.1. Effect 5 looked identical to 1.
+EFFECTS: dict[str, int] = {
+    "off": 0,
+    "solid": 1,
+    "spin": 2,
+    "rainbow": 3,
+    "blink": 4,
+    "pulse": 6,
+}
+
+ZoneValue = int | None | tuple[int, str]
 
 #: Room for the payload. USB is [0x02][len]; BLE prefixes one more report id byte.
 _USB_SIZE, _BLE_SIZE = 63, 64
@@ -24,8 +49,8 @@ _KEY_COUNT = 6
 
 def _entry(index: int, color: int | None) -> dict:
     if color is None:
-        return {"id": index, "c": 0, "b": 0, "e": _EFFECT_OFF, "s": 0}
-    return {"id": index, "c": color, "b": 1, "e": _EFFECT_SOLID, "s": 0}
+        return {"id": index, "c": 0, "b": 0, "e": EFFECTS["off"], "s": 0}
+    return {"id": index, "c": color, "b": 1, "e": EFFECTS["solid"], "s": 0}
 
 
 def thstatus(colors: list[int | None]) -> dict:
@@ -36,24 +61,31 @@ def thstatus(colors: list[int | None]) -> dict:
             "p": [_entry(i, c) for i, c in enumerate(colors)]}
 
 
-def _side(color: int | None) -> dict:
-    if color is None:
-        return {"e": _EFFECT_OFF, "b": 0, "s": 0, "c": 0}
-    return {"e": _EFFECT_SOLID, "b": 1, "s": 0, "c": color}
+def _side(value: ZoneValue) -> dict:
+    if value is None:
+        return {"e": EFFECTS["off"], "b": 0, "s": 0, "c": 0}
+
+    color, effect = value if isinstance(value, tuple) else (value, "solid")
+    if effect not in EFFECTS:
+        raise ValueError(f"unknown effect: {effect!r}")
+    return {"e": EFFECTS[effect], "b": 1, "s": 1, "c": color}
 
 
-#: Needed to tell "leave this zone alone" apart from "turn this zone off" (None).
-_UNSET = object()
+class _UnsetType:
+    """Sentinel type separating an untouched zone from a zone turned off."""
 
 
-def rgbcfg(keys: int | None | object = _UNSET,
-           ambient: int | None | object = _UNSET) -> dict:
+_UNSET = _UnsetType()
+
+
+def rgbcfg(keys: ZoneValue | _UnsetType = _UNSET,
+           ambient: ZoneValue | _UnsetType = _UNSET) -> dict:
     """C-key backlight (keys) and border (ambient). Omitted zones are untouched."""
     params: dict = {}
-    if keys is not _UNSET:
-        params["keys"] = _side(keys)          # type: ignore[arg-type]
-    if ambient is not _UNSET:
-        params["ambient"] = _side(ambient)    # type: ignore[arg-type]
+    if not isinstance(keys, _UnsetType):
+        params["keys"] = _side(keys)
+    if not isinstance(ambient, _UnsetType):
+        params["ambient"] = _side(ambient)
     if not params:
         raise ValueError("rgbcfg needs at least one of keys / ambient")
     return {"m": _METHOD_RGBCFG, "p": params}
