@@ -98,7 +98,12 @@ def test_runtime_paths_keep_symlink_evidence_for_trust_boundaries(tmp_path: Path
 
 def test_no_arguments_prints_help_and_succeeds(capsys):
     assert cli.main([]) == 0
-    assert "paneglow" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "paneglow" in output
+    assert (
+        "Monitor and open parallel Claude Code Desktop sessions "
+        "from Codex Micro on macOS."
+    ) in " ".join(output.split())
 
 
 def test_invalid_timeout_returns_two_without_raising(capsys):

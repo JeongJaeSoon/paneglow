@@ -2444,7 +2444,13 @@ def _hook_main() -> int:
 def _build_parser():
     import argparse
 
-    parser = argparse.ArgumentParser(prog="paneglow")
+    parser = argparse.ArgumentParser(
+        prog="paneglow",
+        description=(
+            "Monitor and open parallel Claude Code Desktop sessions "
+            "from Codex Micro on macOS."
+        ),
+    )
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("hook", help="consume one Claude hook event (always succeeds)")
     commands.add_parser("run", help="run the daemon in the foreground")
