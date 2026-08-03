@@ -153,16 +153,19 @@ transport 중복의 원인, 정확한 앱 focus 전환 시각 자체를 이 결�
 
 ## 다시 사용할 때
 
-현재 daemon 실행 여부는 이 기록으로 단정하지 않는다. 다음 명령으로 먼저 확인하고, 멈춰 있으면
-시작한다.
+현재 daemon 실행 여부는 이 기록으로 단정하지 않는다. 이 측정 뒤 per-user LaunchAgent
+설치·상태·제거 CLI가 구현됐지만, 이 문서의 2026-08-04 installed-product 실행에는 실제
+`launchctl bootstrap`과 logout/login 반복이 포함되지 않았다. 먼저 다음 명령으로 확인한다.
 
 ```bash
 cd /path/to/paneglow
+.venv/bin/paneglow autostart status
 .venv/bin/paneglow status
-.venv/bin/paneglow start
 .venv/bin/paneglow doctor
 ```
 
-재부팅 뒤에는 자동 시작되지 않는다. Claude Desktop이 Agent 키를 소유할 때 A1은 현재 live
-세션을 연다. Codex가 전면이면 Paneglow는 의도적으로 자신의 dispatch를 양보한다. 이는 Codex의
-동일 raw 입력 처리를 중단시키지는 않는다.
+자동 시작이 아직 설치되지 않았으면 `.venv/bin/paneglow autostart install`을 실행한다. 실제
+logout/login 또는 재부팅 뒤 별도 `start` 없이 올라오는지는 후속 installed-product 검증으로
+남아 있다. Claude Desktop이 Agent 키를 소유할 때 A1은 현재 live 세션을 연다. Codex가 전면이면
+Paneglow는 의도적으로 자신의 dispatch를 양보한다. 이는 Codex의 동일 raw 입력 처리를
+중단시키지는 않는다.

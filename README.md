@@ -27,11 +27,12 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e .
 ```
 
-Claude Code 훅을 기존 설정에 병합하고 데몬을 시작한다.
+Claude Code 훅을 기존 설정에 병합하고 로그인 자동 시작을 설치한다.
 
 ```bash
 .venv/bin/paneglow install-hooks
-.venv/bin/paneglow start
+.venv/bin/paneglow autostart install
+.venv/bin/paneglow autostart status
 .venv/bin/paneglow status
 .venv/bin/paneglow doctor
 ```
@@ -52,17 +53,28 @@ Claude Code 훅을 기존 설정에 병합하고 데몬을 시작한다.
 경고를 낸다. 패드가 없어도 데몬은 상태 수집을 계속하며 재연결을 시도하지만, `doctor`의 패드
 검사는 실패한다.
 
-로그인 후 자동 시작은 아직 제공하지 않는다. 재부팅 뒤에는 다음 명령을 다시 실행한다.
+`autostart install`은 현재 사용자의
+`~/Library/LaunchAgents/io.github.jeongjaesoon.paneglow.plist`를 owner-only `0600`으로
+설치하고 daemon을 시작한다. launchd는 foreground `run` 프로세스를 직접 소유하며, 정상적인
+`stop` 뒤에는 다시 띄우지 않고 runtime 실패만 제한적으로 재시작한다. plist에도 현재 가상환경
+Python의 절대 경로가 기록되므로 저장소나 `.venv`를 옮겼다면 새 위치에서 `install-hooks`와
+`autostart install`을 다시 실행한다.
+
+자동 시작을 설치하지 않고 이번 로그인에서만 쓰려면 기존 수동 시작도 가능하다.
 
 ```bash
 .venv/bin/paneglow start
 ```
 
-종료와 상태 확인은 하드웨어를 열지 않는 별도 명령이다.
+종료와 상태 확인은 하드웨어를 열지 않는 별도 명령이다. 자동 시작이 설치된 상태의 `stop`은
+현재 daemon만 정상 종료하며 다음 로그인에는 다시 시작된다. 현재 로그인에서 `start`하면
+detached process 대신 설치된 LaunchAgent를 다시 시작한다. 자동 시작 자체를 없애려면
+`autostart uninstall`을 사용한다.
 
 ```bash
 .venv/bin/paneglow status
 .venv/bin/paneglow stop
+.venv/bin/paneglow autostart uninstall
 ```
 
 데몬 로그는 `~/.paneglow/logs/daemon.log`에 기록된다.
@@ -125,7 +137,7 @@ Claude Desktop 경로의 구현은 완료되어 있다.
 | 11개 Claude 훅·원자적 설치 | ✅ 훅 경로는 항상 무출력·종료 코드 0 |
 | macOS frontmost gate·USB/BLE IOKit | ✅ 별도 TCC 권한 없이 동작 |
 | 상주 daemon·start/stop/status/doctor | ✅ private snapshot과 fail-closed PID 전환 |
-| 로그인 시 자동 시작 | 미구현 — 현재는 `paneglow start` 수동 실행 |
+| 로그인 시 자동 시작 | ✅ owner-only per-user LaunchAgent 설치·상태·제거 |
 
 실기와 앱 번들로 확인한 근거는 [하드웨어 노트](docs/hardware-notes.md),
 [딥링크 실측](docs/verification/deeplink.md), [훅 이벤트 검증](docs/verification/hook-events.md)에
