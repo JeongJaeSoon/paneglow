@@ -716,6 +716,22 @@ class Pad:
         messages, self._messages = self._messages, []
         return messages
 
+    def discard_hid_inputs(self) -> int:
+        """Drop key events queued before a daemon status-verification boundary.
+
+        Status requests pump the run loop, so input received while the layer is
+        unknown can otherwise remain queued and replay after the gate re-arms.
+        Non-input protocol messages stay queued for normal ACK handling.
+        """
+        self._assert_owner_thread()
+        self._drain_reports()
+        before = len(self._messages)
+        self._messages = [
+            message for message in self._messages
+            if message.get("m") != "v.oai.hid"
+        ]
+        return before - len(self._messages)
+
     @staticmethod
     def _matches_reply(message: dict, request_id: int,
                        method: str | None) -> bool:
@@ -846,8 +862,14 @@ class Pad:
             self._clear_registration_references()
         return first_error
 
-    def close(self, flush_seconds: float = 1.0) -> None:
-        """Turn off both owned zones, pump the writes, then dispose exactly once."""
+    def close(self, flush_seconds: float = 1.0, *,
+              turn_off_keys: bool = True,
+              turn_off_ambient: bool = True) -> None:
+        """Optionally turn off owned zones, flush, then dispose exactly once.
+
+        The daemon passes zone ownership explicitly on shutdown.  Defaults keep
+        direct/context-manager use backward compatible by clearing both zones.
+        """
         self._assert_owner_thread()
         if flush_seconds < 0:
             raise ValueError("flush_seconds must be non-negative")
@@ -868,10 +890,12 @@ class Pad:
             if self.connected:
                 # Keep these as separate attempts: a failed key write must not
                 # prevent the ambient-off write from being submitted.
-                attempt("key-off write", lambda: self.send(
-                    protocol.thstatus([None] * 6)))
-                attempt("ambient-off write", lambda: self.send(
-                    protocol.rgbcfg(ambient=None)))
+                if turn_off_keys:
+                    attempt("key-off write", lambda: self.send(
+                        protocol.thstatus([None] * 6)))
+                if turn_off_ambient:
+                    attempt("ambient-off write", lambda: self.send(
+                        protocol.rgbcfg(ambient=None)))
             if self._registration is not None:
                 attempt("close flush", lambda: self._pump_for(
                     flush_seconds, stop_on_disconnect=False,

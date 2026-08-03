@@ -472,6 +472,19 @@ def test_status_preserves_verified_layer_and_safe_firmware_string():
     assert device.firmware_version == "v0.4.1"
 
 
+def test_discard_hid_inputs_drops_prearm_keys_but_preserves_vendor_ack():
+    backend = FakeBackend()
+    backend.auto_status = True
+    device, backend = open_fake(backend)
+    key = {"m": "v.oai.hid", "p": {"k": "AG00", "act": 1}}
+    ack = {"result": {"ok": 1}, "id": 7, "method": "v.oai.rgbcfg"}
+    backend.queue_message(key)
+    backend.queue_message(ack)
+    assert device.status(timeout=0.2) is not None
+    assert device.discard_hid_inputs() == 1
+    assert device.poll(0) == [ack]
+
+
 def test_non_string_firmware_is_not_preserved_but_layer_stays_verified():
     backend = FakeBackend()
     backend.status_script = lambda request: [{
@@ -671,6 +684,30 @@ def test_close_turns_both_zones_off_pumps_then_cleans_up_in_exact_order():
     event_count = len(backend.events)
     device.close()
     assert len(backend.events) == event_count
+
+
+@pytest.mark.parametrize(
+    ("turn_off_keys", "turn_off_ambient", "has_keys", "has_ambient"),
+    [
+        (False, True, False, True),
+        (True, False, True, False),
+        (False, False, False, False),
+    ],
+)
+def test_close_only_clears_zones_the_caller_owns(
+        turn_off_keys, turn_off_ambient, has_keys, has_ambient):
+    device, backend = open_fake()
+    device.close(
+        flush_seconds=0,
+        turn_off_keys=turn_off_keys,
+        turn_off_ambient=turn_off_ambient,
+    )
+    messages = decoded_writes(backend)
+    assert (protocol.thstatus([None] * 6) in messages) is has_keys
+    assert (protocol.rgbcfg(ambient=None) in messages) is has_ambient
+    assert backend.events[-4:] == [
+        "unregister", "unschedule", "close", "release",
+    ]
 
 
 def test_close_cleanup_runs_even_when_write_and_pump_fail():
