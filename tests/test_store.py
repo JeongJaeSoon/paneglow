@@ -5,12 +5,12 @@ from pathlib import Path
 import pytest
 
 from paneglow.state import AgentState
-from paneglow.store import SessionRecord, write, read_all, by_tty, prune
+from paneglow.store import SessionRecord, write, read_all, prune
 
 
-def rec(sid="s1", tty="/dev/ttys002", state=AgentState.WORKING, rev=1, at=100.0):
-    return SessionRecord(session_id=sid, tty=tty, cwd="/tmp",
-                         state=state, rev=rev, updated_at=at, pid=1)
+def rec(sid="s1", state=AgentState.WORKING, rev=1, at=100.0):
+    return SessionRecord(session_id=sid, cwd="/tmp", state=state,
+                         rev=rev, updated_at=at)
 
 
 def test_write_then_read(tmp_path: Path):
@@ -43,6 +43,25 @@ def test_no_partial_file_left_behind(tmp_path: Path):
     assert [p.name for p in tmp_path.glob("*.json")] == ["s1.json"]
 
 
+def test_new_records_serialize_only_the_desktop_fields(tmp_path: Path):
+    write(rec(), tmp_path)
+    payload = json.loads((tmp_path / "s1.json").read_text())
+    assert set(payload) == {"session_id", "cwd", "state", "rev", "updated_at"}
+
+
+def test_legacy_tty_and_pid_fields_are_ignored_on_read(tmp_path: Path):
+    payload = {
+        "session_id": "legacy", "tty": "/dev/ttys002", "cwd": "/tmp",
+        "state": "waiting", "rev": 2, "updated_at": 123.0, "pid": 99,
+    }
+    (tmp_path / "legacy.json").write_text(json.dumps(payload))
+
+    got = read_all(tmp_path)
+    assert got == [SessionRecord("legacy", "/tmp", AgentState.WAITING, 2, 123.0)]
+    assert not hasattr(got[0], "tty")
+    assert not hasattr(got[0], "pid")
+
+
 @pytest.mark.parametrize("session_id", [
     "../escaped", "a/b", "..", ".", "", "x\x00y", "sub/../../out",
 ])
@@ -70,65 +89,57 @@ def test_a_record_that_renames_itself_is_ignored(tmp_path: Path, claimed):
 def test_prune_cannot_delete_another_sessions_file(tmp_path: Path):
     """A dead record claiming a live session's id used to make prune() unlink
     the live file and leave the dead one behind."""
-    write(rec(sid="important", tty="/dev/ttys002", at=500.0), tmp_path)
-    write(rec(sid="junk", tty="/dev/ttys099", at=100.0), tmp_path)
+    write(rec(sid="important", at=500.0), tmp_path)
+    write(rec(sid="junk", at=100.0), tmp_path)
 
     payload = json.loads((tmp_path / "junk.json").read_text())
     payload["session_id"] = "important"
     (tmp_path / "junk.json").write_text(json.dumps(payload))
 
-    prune(tmp_path, live_ttys={"/dev/ttys002"}, ttl_seconds=999, now=600.0)
+    prune(tmp_path, live_ids={"important"}, ttl_seconds=999, now=600.0)
     assert (tmp_path / "important.json").exists(), "the live session was deleted"
 
 
 def test_prune_survives_a_non_string_id(tmp_path: Path):
     """`"/" in 123` raises TypeError and took prune() down with it."""
-    write(rec(sid="x", tty="/dev/ttys002"), tmp_path)
+    write(rec(sid="x"), tmp_path)
     payload = json.loads((tmp_path / "x.json").read_text())
     payload["session_id"] = 123
     (tmp_path / "x.json").write_text(json.dumps(payload))
 
-    assert prune(tmp_path, live_ttys=set(), ttl_seconds=1, now=99.0) == 0
+    assert prune(tmp_path, live_ids=set(), ttl_seconds=1, now=99.0) == 0
 
 
-def test_by_tty_keeps_newest(tmp_path: Path):
-    old = rec(sid="old", rev=1, at=100.0, state=AgentState.WAITING)
-    new = rec(sid="new", rev=1, at=200.0, state=AgentState.WORKING)
-    picked = by_tty([old, new])
-    assert picked["/dev/ttys002"].session_id == "new"
-
-
-def test_prune_removes_dead_tty(tmp_path: Path):
-    write(rec(sid="alive", tty="/dev/ttys002", at=1000.0), tmp_path)
-    write(rec(sid="dead", tty="/dev/ttys009", at=1000.0), tmp_path)
-    removed = prune(tmp_path, live_ttys={"/dev/ttys002"}, ttl_seconds=999, now=1001.0)
+def test_authoritative_live_ids_remove_a_missing_session_immediately(tmp_path: Path):
+    write(rec(sid="alive", at=1000.0), tmp_path)
+    write(rec(sid="dead", at=1000.0), tmp_path)
+    removed = prune(tmp_path, live_ids={"alive"}, ttl_seconds=999, now=1001.0)
     assert removed == 1
     assert {r.session_id for r in read_all(tmp_path)} == {"alive"}
 
 
 def test_prune_keeps_quiet_but_live_session(tmp_path: Path):
-    """Hooks only fire on change. A quiet pane iTerm2 still has is alive."""
-    write(rec(sid="quiet", tty="/dev/ttys002", at=0.0), tmp_path)
-    removed = prune(tmp_path, live_ttys={"/dev/ttys002"}, ttl_seconds=10, now=99999.0)
+    """Hooks only fire on change. An authoritative live session stays alive."""
+    write(rec(sid="quiet", at=0.0), tmp_path)
+    removed = prune(tmp_path, live_ids={"quiet"}, ttl_seconds=10, now=99999.0)
     assert removed == 0
 
 
 def test_prune_ttl_is_only_a_fallback(tmp_path: Path):
-    """TTL only kicks in when iTerm2 could not be reached and live_ttys is unknown."""
-    write(rec(sid="stale", tty="/dev/ttys002", at=0.0), tmp_path)
-    removed = prune(tmp_path, live_ttys=None, ttl_seconds=10, now=99999.0)
+    """TTL only applies when the session scan is not authoritative."""
+    write(rec(sid="stale", at=0.0), tmp_path)
+    removed = prune(tmp_path, live_ids=None, ttl_seconds=10, now=99999.0)
     assert removed == 1
 
 
-def test_prune_reclaims_a_record_whose_tty_was_reused(tmp_path: Path):
-    """A pty gets recycled for the next pane, so the tty stays live while the
-    session behind it is gone. Liveness of the tty string alone leaks forever."""
-    write(rec(sid="closed", tty="/dev/ttys005", at=100.0), tmp_path)
-    write(rec(sid="reopened", tty="/dev/ttys005", at=200.0), tmp_path)
+def test_prune_ttl_keeps_a_record_at_the_exact_boundary(tmp_path: Path):
+    write(rec(sid="boundary", at=100.0), tmp_path)
+    assert prune(tmp_path, live_ids=None, ttl_seconds=10, now=110.0) == 0
 
-    removed = prune(tmp_path, live_ttys={"/dev/ttys005"}, ttl_seconds=999, now=201.0)
-    assert removed == 1
-    assert {r.session_id for r in read_all(tmp_path)} == {"reopened"}
+
+def test_authoritative_empty_set_does_not_wait_for_ttl(tmp_path: Path):
+    write(rec(sid="gone", at=100.0), tmp_path)
+    assert prune(tmp_path, live_ids=set(), ttl_seconds=9999, now=100.0) == 1
 
 
 def test_concurrent_writers_cannot_lose_a_newer_state(tmp_path: Path, monkeypatch):

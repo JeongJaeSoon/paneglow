@@ -3,28 +3,48 @@ nothing here may block startup."""
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from paneglow.protocol import EFFECTS
+
 _GATE_MODES = {"frontmost", "always", "off"}
 _UNDERGLOW_MODES = {"outside", "all_claude", "current_tab", "off"}
+_SCOPES = {"outside", "all_sessions", "off"}
+_SLOT_ORDERS = {"recent_sticky", "recent", "priority"}
+_LAYER_UNDERGLOW = {"keep", "off"}
 #: C5 and C6 share one wide keycap, so pressing it reports both ids.
 _MOD_KEYS = {"C1", "C2", "C3", "C4", "C7", "KNOB_PRESS"}
+_HEX_COLOUR = re.compile(r"#[0-9a-fA-F]{6}")
 
 
 @dataclass(frozen=True)
 class Config:
     gate_mode: str = "frontmost"
-    yield_to: tuple[str, ...] = ("com.openai.chat",)
-    own_when: tuple[str, ...] = ("com.googlecode.iterm2",)
+    yield_to: tuple[str, ...] = ("com.openai.codex",)
+    own_when: tuple[str, ...] = ("com.anthropic.claudefordesktop",)
+    slots_order: str = "recent_sticky"
+    underglow_claude: int = 0xFF6D00
+    underglow_codex: int = 0x304FFE
+    effect_normal: str = "solid"
+    effect_alert: str = "blink"
+    effect_fault: str = "rainbow"
+    underglow_scope: str = "outside"
+    reclaim_delay_ms: int = 200
+    layer_underglow: str = "keep"
+    ttl_minutes: int = 30
+    done_fade_seconds: int = 180
+    working_max_seconds: int = 900
+    poll_ms: int = 250
+    status_poll_ms: int = 1000
+
+    # Deprecated iTerm settings kept readable until the compatibility cleanup.
     mod_key: str = "C7"
     knob_tab_switch: bool = True
     mod_direct_tab: bool = True
     underglow_iterm: str = "outside"
-    underglow_codex: str = "all_claude"
-    ttl_minutes: int = 30
-    done_fade_seconds: int = 180
-    poll_ms: int = 250
+    legacy_underglow_codex_mode: str = "all_claude"
     mod_release_timeout_ms: int = 5000
 
 
@@ -95,6 +115,19 @@ def _strings(value, default: tuple[str, ...], label: str,
     return tuple(value)
 
 
+def _colour(value, default: int, label: str, warnings: list[str]) -> int:
+    """Read a 24-bit integer or an exact ``#RRGGBB`` string."""
+    if value is None:
+        return default
+    if isinstance(value, int) and not isinstance(value, bool):
+        if 0 <= value <= 0xFFFFFF:
+            return value
+        return _reject(value, default, label, warnings)
+    if isinstance(value, str) and _HEX_COLOUR.fullmatch(value):
+        return int(value[1:], 16)
+    return _reject(value, default, label, warnings)
+
+
 def load(path: Path | None) -> tuple[Config, list[str]]:
     warnings: list[str] = []
     raw: dict = {}
@@ -117,30 +150,64 @@ def load(path: Path | None) -> tuple[Config, list[str]]:
     glow = _section(raw, "underglow", "underglow", warnings)
     timing = _section(raw, "timing", "timing", warnings)
     state = _section(raw, "state", "state", warnings)
+    slots = _section(raw, "slots", "slots", warnings)
+    layer = _section(raw, "layer_gate", "layer_gate", warnings)
     tabs = _section(raw, "tab_switch", "tab_switch", warnings)
+
+    effects_section = _section(glow, "effects", "underglow.effects", warnings)
+    effects = {
+        name: _pick(effects_section.get(name), set(EFFECTS), default,
+                    f"underglow.effects.{name}", warnings)
+        for name, default in (("normal", "solid"), ("alert", "blink"),
+                              ("fault", "rainbow"))
+    }
+    for name in ("normal", "alert"):
+        if effects[name] == "rainbow":
+            warnings.append(
+                f"underglow.effects.{name}: rainbow ignores the ownership colour")
+    if len(set(effects.values())) < len(effects):
+        warnings.append("underglow.effects: two states use the same effect")
 
     return Config(
         gate_mode=_pick(gate.get("mode"), _GATE_MODES, "frontmost", "gate.mode", warnings),
-        yield_to=_strings(gate.get("yield_to"), ("com.openai.chat",),
+        yield_to=_strings(gate.get("yield_to"), ("com.openai.codex",),
                           "gate.yield_to", warnings),
-        own_when=_strings(gate.get("own_when"), ("com.googlecode.iterm2",),
+        own_when=_strings(gate.get("own_when"), ("com.anthropic.claudefordesktop",),
                           "gate.own_when", warnings),
+        slots_order=_pick(slots.get("order"), _SLOT_ORDERS, "recent_sticky",
+                          "slots.order", warnings),
+        underglow_claude=_colour(glow.get("claude"), 0xFF6D00,
+                                 "underglow.claude", warnings),
+        underglow_codex=_colour(glow.get("codex"), 0x304FFE,
+                                "underglow.codex", warnings),
+        effect_normal=effects["normal"],
+        effect_alert=effects["alert"],
+        effect_fault=effects["fault"],
+        underglow_scope=_pick(glow.get("scope"), _SCOPES, "outside",
+                              "underglow.scope", warnings),
+        reclaim_delay_ms=_int(glow, "reclaim_delay_ms", 200,
+                              "underglow.reclaim_delay_ms", warnings, minimum=0),
+        layer_underglow=_pick(layer.get("underglow"), _LAYER_UNDERGLOW, "keep",
+                              "layer_gate.underglow", warnings),
+        ttl_minutes=_int(state, "ttl_minutes", 30, "state.ttl_minutes",
+                         warnings, minimum=1),
+        done_fade_seconds=_int(state, "done_fade_seconds", 180,
+                               "state.done_fade_seconds", warnings, minimum=0),
+        working_max_seconds=_int(state, "working_max_seconds", 900,
+                                 "state.working_max_seconds", warnings, minimum=0),
+        poll_ms=_int(timing, "poll_ms", 250, "timing.poll_ms",
+                     warnings, minimum=1),
+        status_poll_ms=_int(timing, "status_poll_ms", 1000,
+                            "timing.status_poll_ms", warnings, minimum=1),
         mod_key=_pick(raw.get("mod_key"), _MOD_KEYS, "C7", "mod_key", warnings),
         knob_tab_switch=_bool(tabs, "knob", True, "tab_switch.knob", warnings),
         mod_direct_tab=_bool(tabs, "mod_direct", True, "tab_switch.mod_direct", warnings),
         underglow_iterm=_pick(
             _section(glow, "when_iterm", "underglow.when_iterm", warnings).get("mode"),
             _UNDERGLOW_MODES, "outside", "underglow.when_iterm.mode", warnings),
-        underglow_codex=_pick(
+        legacy_underglow_codex_mode=_pick(
             _section(glow, "when_codex", "underglow.when_codex", warnings).get("mode"),
             _UNDERGLOW_MODES, "all_claude", "underglow.when_codex.mode", warnings),
-        ttl_minutes=_int(state, "ttl_minutes", 30, "state.ttl_minutes",
-                         warnings, minimum=1),
-        # 0 is meaningful here: fade off immediately.
-        done_fade_seconds=_int(state, "done_fade_seconds", 180,
-                               "state.done_fade_seconds", warnings, minimum=0),
-        poll_ms=_int(timing, "poll_ms", 250, "timing.poll_ms",
-                     warnings, minimum=1),
         mod_release_timeout_ms=_int(timing, "mod_release_timeout_ms", 5000,
                                     "timing.mod_release_timeout_ms",
                                     warnings, minimum=1),
