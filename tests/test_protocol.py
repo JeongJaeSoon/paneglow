@@ -1,6 +1,7 @@
 import json
 import pytest
 
+from paneglow import protocol
 from paneglow.protocol import (
     USB, BLE, thstatus, rgbcfg, status_request, frame, FrameDecoder,
 )
@@ -104,6 +105,24 @@ def test_frame_rejects_an_unknown_transport():
         frame({"m": "x"}, "")
 
 
+def test_normalize_transport_accepts_measured_iokit_strings():
+    assert protocol.normalize_transport("USB") == USB
+    assert protocol.normalize_transport("Bluetooth Low Energy") == BLE
+
+
+def test_normalize_transport_is_case_insensitive():
+    assert protocol.normalize_transport("usb") == USB
+    assert protocol.normalize_transport("bluetooth low energy") == BLE
+
+
+@pytest.mark.parametrize(
+    "value", [None, "", "Serial", "SPI", "Not Bluetooth", "USB-ish"])
+def test_normalize_transport_rejects_unknown_values(value):
+    """Guessing a transport selects framing that the device silently drops."""
+    with pytest.raises(ValueError):
+        protocol.normalize_transport(value)
+
+
 def test_decoder_buffer_stays_bounded():
     """The daemon runs for days. A dropped packet leaves a fragment that never
     terminates, and without a cap every resync appends behind it forever."""
@@ -132,6 +151,44 @@ def test_decoder_resyncs_after_a_flood():
 def test_rgbcfg_touches_only_the_zone_you_name():
     assert set(rgbcfg(ambient=0xFF6D00)["p"]) == {"ambient"}
     assert set(rgbcfg(keys=None)["p"]) == {"keys"}
+
+
+def test_effects_match_the_measured_firmware_values():
+    assert protocol.EFFECTS == {
+        "off": 0,
+        "solid": 1,
+        "spin": 2,
+        "rainbow": 3,
+        "blink": 4,
+        "pulse": 6,
+    }
+
+
+def test_rgbcfg_plain_colour_stays_solid():
+    assert rgbcfg(ambient=0xFF6D00)["p"]["ambient"] == {
+        "e": 1, "b": 1, "s": 1, "c": 0xFF6D00,
+    }
+
+
+def test_rgbcfg_accepts_colour_and_effect_for_either_zone():
+    msg = rgbcfg(keys=(0x304FFE, "pulse"), ambient=(0xFF6D00, "blink"))
+    assert msg["p"]["keys"] == {"e": 6, "b": 1, "s": 1, "c": 0x304FFE}
+    assert msg["p"]["ambient"] == {"e": 4, "b": 1, "s": 1, "c": 0xFF6D00}
+
+
+def test_rgbcfg_none_turns_off_only_the_named_zone():
+    msg = rgbcfg(ambient=None)
+    assert msg["p"] == {"ambient": {"e": 0, "b": 0, "s": 0, "c": 0}}
+
+
+def test_rgbcfg_rejects_an_unknown_effect():
+    with pytest.raises(ValueError, match="unknown effect"):
+        rgbcfg(ambient=(0xFF6D00, "sparkle"))
+
+
+def test_thstatus_keeps_per_key_colours_solid():
+    entry = thstatus([0x304FFE] + [None] * 5)["p"][0]
+    assert entry == {"id": 0, "c": 0x304FFE, "b": 1, "e": 1, "s": 0}
 
 
 def test_rgbcfg_needs_a_zone():
