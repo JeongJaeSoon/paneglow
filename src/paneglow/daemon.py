@@ -131,6 +131,11 @@ class Daemon:
     def verified_layer(self) -> int | None:
         return self._verified_layer
 
+    @property
+    def feedback_active(self) -> bool:
+        """Whether the current desired border is the short fault feedback."""
+        return self._feedback_until is not None
+
     def _cause(self, value: str) -> None:
         if value not in self._tick_causes:
             self._tick_causes.append(value)
