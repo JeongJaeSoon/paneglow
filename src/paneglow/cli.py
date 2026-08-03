@@ -1714,8 +1714,434 @@ def _identity_ready(paths: RuntimePaths, *, child_pid: int,
         transition.close()
 
 
-def _cmd_start(paths: RuntimePaths, timeout: float, *,
-               stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
+def _launch_agent_spec(paths: RuntimePaths,
+                       env: Mapping[str, str] | None = None):
+    """Build the current login service spec without importing it on hook paths."""
+    from paneglow import launch_agent
+
+    source = os.environ if env is None else env
+    account_home = launch_agent.current_account_home()
+    overrides: dict[str, Path] = {}
+    candidates = {
+        "PANEGLOW_HOME": (paths.home, account_home / ".paneglow"),
+        "PANEGLOW_CLAUDE_SETTINGS": (
+            paths.claude_settings_path, account_home / ".claude" / "settings.json"
+        ),
+        "PANEGLOW_CLAUDE_SESSIONS": (
+            paths.claude_sessions_dir, account_home / ".claude" / "sessions"
+        ),
+        "PANEGLOW_MAPPING_DIR": (
+            paths.mapping_dir,
+            account_home / "Library" / "Application Support" / "Claude"
+            / "claude-code-sessions",
+        ),
+    }
+    for key, (value, default) in candidates.items():
+        if key in source or value != default:
+            overrides[key] = value
+    return launch_agent.build_spec(
+        command_prefix=_absolute_command_prefix(),
+        runtime_home=paths.home,
+        log_path=paths.log_path,
+        runtime_environment=overrides,
+        account_home=account_home,
+    )
+
+
+def _service_ready(paths: RuntimePaths, *, status_poll_ms: int) \
+        -> InstanceIdentity | None:
+    try:
+        identity, snapshot = _runtime_identity(
+            paths, status_poll_ms=status_poll_ms
+        )
+    except RuntimeDataError:
+        return None
+    return identity if snapshot["generation"] >= 1 else None
+
+
+def _wait_service_ready(paths: RuntimePaths, *, timeout: float,
+                        status_poll_ms: int) -> InstanceIdentity | None:
+    deadline = time.monotonic() + timeout
+    while True:
+        identity = _service_ready(paths, status_poll_ms=status_poll_ms)
+        if identity is not None:
+            return identity
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.05)
+
+
+def _rollback_launch_agent(
+    paths: RuntimePaths,
+    spec: object,
+    controller: object,
+    previous: object,
+    previous_loaded: bool,
+    manual_was_running: bool,
+    *,
+    timeout: float,
+    status_poll_ms: int,
+) -> bool:
+    """Restore the exact prior lifecycle owner, or report rollback failure."""
+    from paneglow import launch_agent
+
+    try:
+        if controller.loaded():
+            controller.bootout()
+            if not _wait_runtime_stopped(paths, timeout):
+                return False
+        current = launch_agent.inspect_manifest(spec)
+        if current.status in {"unsafe", "unknown"}:
+            return False
+        if previous.owned and previous.payload is not None:
+            launch_agent.atomic_write_manifest(spec, previous.payload)
+            restored = launch_agent.inspect_manifest(spec)
+            if restored.payload != previous.payload or not restored.owned:
+                return False
+            if previous_loaded:
+                controller.bootstrap()
+                controller.kickstart()
+                if _wait_service_ready(
+                    paths, timeout=timeout, status_poll_ms=status_poll_ms
+                ) is None:
+                    return False
+        else:
+            if current.owned:
+                launch_agent.remove_manifest(spec, current)
+            if launch_agent.inspect_manifest(spec).status != "missing":
+                return False
+        if not previous_loaded and manual_was_running and _cmd_start_locked(
+                paths,
+                timeout,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                manual_only=True,
+            ) != 0:
+            return False
+        return True
+    except (OSError, RuntimeError, launch_agent.LaunchAgentError):
+        return False
+
+
+def _cmd_autostart_install(
+    paths: RuntimePaths,
+    timeout: float,
+    *,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+    spec: object | None = None,
+    controller: object | None = None,
+) -> int:
+    from paneglow import launch_agent
+
+    stdout = sys.stdout if stdout is None else stdout
+    stderr = sys.stderr if stderr is None else stderr
+    rollback_attempted = False
+    rollback_ok = False
+    try:
+        selected = _launch_agent_spec(paths) if spec is None else spec
+        service = launch_agent.Controller(selected) if controller is None else controller
+        launch_agent.validate_program(selected)
+        launch_agent.ensure_install_directories(selected)
+        launch_agent.ensure_private_log(selected)
+        with launch_agent.InstallLock(selected):
+            existing = launch_agent.inspect_manifest(selected)
+            if existing.status in {"unsafe", "unknown"}:
+                raise launch_agent.LaunchAgentError(
+                    "existing LaunchAgent manifest is not owned by Paneglow")
+            loaded = service.loaded()
+            if existing.status == "missing" and loaded:
+                raise launch_agent.LaunchAgentError(
+                    "loaded service has no recognized manifest")
+            cfg, _warnings = _load_config(paths)
+            poll_ms = getattr(cfg, "status_poll_ms", 1000)
+            if existing.status == "current" and loaded:
+                ready = _service_ready(paths, status_poll_ms=poll_ms)
+                if ready is not None:
+                    print(
+                        f"paneglow: login autostart already installed "
+                        f"(pid {ready.pid})",
+                        file=stdout,
+                    )
+                    return 0
+
+            previous_loaded = loaded
+            manual_was_running = False
+            try:
+                # Never bootstrap a KeepAlive job beside another daemon. A
+                # loaded service is torn down by launchd first; only an
+                # unloaded/manual daemon is ever sent a verified SIGTERM.
+                if loaded:
+                    service.bootout()
+                    if not _wait_runtime_stopped(paths, timeout):
+                        raise launch_agent.LaunchAgentError(
+                            "LaunchAgent did not stop after bootout")
+                else:
+                    try:
+                        manual_was_running = _lock_is_held(paths.lock_path)
+                    except RuntimeDataError as error:
+                        raise launch_agent.LaunchAgentError(
+                            "daemon lock is unsafe") from error
+                    if manual_was_running and _cmd_stop_runtime(
+                        paths,
+                        timeout,
+                        stdout=io.StringIO(),
+                        stderr=io.StringIO(),
+                    ) != 0:
+                        raise launch_agent.LaunchAgentError(
+                            "existing daemon could not be stopped safely")
+
+                # Bind replacement to the exact state inspected under the
+                # installer lock. A concurrently introduced unknown plist is
+                # never overwritten.
+                before_write = launch_agent.inspect_manifest(selected)
+                if existing.status == "missing":
+                    unchanged = before_write.status == "missing"
+                else:
+                    unchanged = bool(
+                        before_write.status == existing.status
+                        and before_write.payload == existing.payload
+                        and before_write.device == existing.device
+                        and before_write.inode == existing.inode
+                    )
+                if not unchanged:
+                    raise launch_agent.LaunchAgentError(
+                        "LaunchAgent manifest changed during install")
+                launch_agent.atomic_write_manifest(selected)
+                if launch_agent.inspect_manifest(selected).status != "current":
+                    raise launch_agent.LaunchAgentError(
+                        "installed LaunchAgent manifest could not be verified")
+                service.bootstrap()
+                service.kickstart()
+                identity = _wait_service_ready(
+                    paths, timeout=timeout, status_poll_ms=poll_ms
+                )
+                if identity is None:
+                    raise launch_agent.LaunchAgentError(
+                        "LaunchAgent daemon did not become ready")
+            except (OSError, RuntimeError, launch_agent.LaunchAgentError):
+                rollback_attempted = True
+                rollback_ok = _rollback_launch_agent(
+                    paths,
+                    selected,
+                    service,
+                    existing,
+                    previous_loaded,
+                    manual_was_running,
+                    timeout=timeout,
+                    status_poll_ms=poll_ms,
+                )
+                raise
+    except (OSError, RuntimeError, launch_agent.LaunchAgentError):
+        if rollback_attempted and not rollback_ok:
+            message = (
+                "paneglow: login autostart failed and the previous runtime "
+                "could not be fully restored"
+            )
+        elif rollback_attempted:
+            message = (
+                "paneglow: login autostart was not installed; "
+                "the previous state was restored"
+            )
+        else:
+            message = (
+                "paneglow: login autostart was not installed; "
+                "the existing lifecycle state was not changed"
+            )
+        print(message, file=stderr)
+        return 1
+    print(f"paneglow: installed login autostart (pid {identity.pid})", file=stdout)
+    return 0
+
+
+def _cmd_autostart_status(
+    paths: RuntimePaths,
+    *,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+    spec: object | None = None,
+    controller: object | None = None,
+) -> int:
+    from paneglow import launch_agent
+
+    stdout = sys.stdout if stdout is None else stdout
+    stderr = sys.stderr if stderr is None else stderr
+    try:
+        selected = _launch_agent_spec(paths) if spec is None else spec
+        service = launch_agent.Controller(selected) if controller is None else controller
+        existing = launch_agent.inspect_manifest(selected)
+        if existing.status == "missing":
+            if service.loaded():
+                print(
+                    "autostart   loaded without a recognized manifest",
+                    file=stderr,
+                )
+                return 1
+            print("autostart   not installed", file=stdout)
+            return 1
+        if existing.status in {"unsafe", "unknown"}:
+            print("autostart   unsafe or unrecognized manifest", file=stderr)
+            return 1
+        loaded = service.loaded()
+    except (OSError, RuntimeError, launch_agent.LaunchAgentError):
+        print("autostart   unavailable", file=stderr)
+        return 1
+    freshness = "current" if existing.status == "current" else "stale"
+    load_state = "loaded" if loaded else "not loaded"
+    print(f"autostart   installed | {freshness} | {load_state}", file=stdout)
+    return 0 if freshness == "current" and loaded else 1
+
+
+def _cmd_autostart_uninstall(
+    paths: RuntimePaths,
+    timeout: float,
+    *,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+    spec: object | None = None,
+    controller: object | None = None,
+) -> int:
+    from paneglow import launch_agent
+
+    stdout = sys.stdout if stdout is None else stdout
+    stderr = sys.stderr if stderr is None else stderr
+    rollback_attempted = False
+    rollback_ok = False
+    try:
+        selected = _launch_agent_spec(paths) if spec is None else spec
+        service = launch_agent.Controller(selected) if controller is None else controller
+        initial = launch_agent.inspect_manifest(selected)
+        if initial.status == "unsafe":
+            raise launch_agent.LaunchAgentError(
+                "LaunchAgent manifest ancestors are unsafe")
+        # An absent LaunchAgents directory cannot contain our serialization
+        # lock. Keep an already-uninstalled command read-only in this case.
+        if not launch_agent.validate_manifest_ancestors(selected):
+            if service.loaded():
+                raise launch_agent.LaunchAgentError(
+                    "loaded service has no recognized manifest")
+            print("paneglow: login autostart already uninstalled", file=stdout)
+            return 0
+        launch_agent.ensure_lock_directory(selected)
+        with launch_agent.InstallLock(selected):
+            existing = launch_agent.inspect_manifest(selected)
+            loaded = service.loaded()
+            if existing.status == "missing":
+                if loaded:
+                    raise launch_agent.LaunchAgentError(
+                        "loaded service has no recognized manifest")
+                print("paneglow: login autostart already uninstalled", file=stdout)
+                return 0
+            if not existing.owned:
+                raise launch_agent.LaunchAgentError(
+                    "LaunchAgent manifest is not owned by Paneglow")
+            manual_was_running = False
+            lifecycle_changed = False
+            try:
+                if loaded:
+                    lifecycle_changed = True
+                    service.bootout()
+                    if not _wait_runtime_stopped(paths, timeout):
+                        # The job has been booted out; never bypass launchd by
+                        # signaling an identity that it previously owned.
+                        raise launch_agent.LaunchAgentError(
+                            "LaunchAgent did not stop after bootout")
+                else:
+                    try:
+                        manual_was_running = _lock_is_held(paths.lock_path)
+                    except RuntimeDataError as error:
+                        raise launch_agent.LaunchAgentError(
+                            "daemon lock is unsafe") from error
+                    if manual_was_running:
+                        # A verified SIGTERM may take effect even when the
+                        # bounded stop command reports a timeout. Treat the
+                        # lifecycle as changed before sending it so rollback
+                        # re-establishes the previous manual owner.
+                        lifecycle_changed = True
+                        if _cmd_stop_runtime(
+                            paths,
+                            timeout,
+                            stdout=io.StringIO(),
+                            stderr=io.StringIO(),
+                        ) != 0:
+                            raise launch_agent.LaunchAgentError(
+                                "existing daemon could not be stopped safely")
+                lifecycle_changed = True
+                launch_agent.remove_manifest(selected, existing)
+                if launch_agent.inspect_manifest(selected).status != "missing":
+                    raise launch_agent.LaunchAgentError(
+                        "LaunchAgent manifest remains after removal")
+            except (OSError, RuntimeError, launch_agent.LaunchAgentError):
+                if lifecycle_changed:
+                    rollback_attempted = True
+                    rollback_ok = False
+                    try:
+                        current = launch_agent.inspect_manifest(selected)
+                        if current.status in {"unsafe", "unknown"}:
+                            raise launch_agent.LaunchAgentError(
+                                "manifest changed during uninstall rollback")
+                        if current.status == "missing":
+                            launch_agent.atomic_write_manifest(
+                                selected, existing.payload
+                            )
+                        restored = launch_agent.inspect_manifest(selected)
+                        if restored.payload != existing.payload \
+                                or not restored.owned:
+                            raise launch_agent.LaunchAgentError(
+                                "manifest rollback verification failed")
+                        if loaded:
+                            if not service.loaded():
+                                service.bootstrap()
+                            service.kickstart()
+                            cfg, _warnings = _load_config(paths)
+                            if _wait_service_ready(
+                                paths,
+                                timeout=timeout,
+                                status_poll_ms=getattr(
+                                    cfg, "status_poll_ms", 1000
+                                ),
+                            ) is None:
+                                raise launch_agent.LaunchAgentError(
+                                    "service rollback readiness failed")
+                        elif manual_was_running and _cmd_start_locked(
+                            paths,
+                            timeout,
+                            stdout=io.StringIO(),
+                            stderr=io.StringIO(),
+                            manual_only=True,
+                        ) != 0:
+                            raise launch_agent.LaunchAgentError(
+                                "manual daemon rollback failed")
+                        rollback_ok = True
+                    except (OSError, RuntimeError, launch_agent.LaunchAgentError):
+                        rollback_ok = False
+                raise
+    except (OSError, RuntimeError, launch_agent.LaunchAgentError):
+        if rollback_attempted and not rollback_ok:
+            message = (
+                "paneglow: login autostart removal failed and the previous "
+                "lifecycle could not be fully restored"
+            )
+        elif rollback_attempted:
+            message = (
+                "paneglow: login autostart was not removed; "
+                "the previous lifecycle was restored"
+            )
+        else:
+            message = (
+                "paneglow: login autostart was not removed; "
+                "the existing lifecycle state was not changed"
+            )
+        print(message, file=stderr)
+        return 1
+    print("paneglow: uninstalled login autostart", file=stdout)
+    return 0
+
+
+def _cmd_start_locked(paths: RuntimePaths, timeout: float, *,
+                      stdout: TextIO | None = None,
+                      stderr: TextIO | None = None,
+                      manual_only: bool = False) -> int:
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
     transition = _LifetimeLock(paths.transition_lock_path)
@@ -1751,6 +2177,63 @@ def _cmd_start(paths: RuntimePaths, timeout: float, *,
             return 1
     finally:
         transition.close()
+
+    # Once a current login service is installed, keep one lifecycle owner.
+    # Falling back to a detached child here would make launchd's crash retry
+    # contend for the same lifetime lock.
+    if not manual_only:
+        from paneglow import launch_agent
+        service = None
+        service_activated = False
+        try:
+            service_spec = _launch_agent_spec(paths)
+            service_manifest = launch_agent.inspect_manifest(service_spec)
+            service = launch_agent.Controller(service_spec)
+            if service_manifest.status == "missing":
+                if service.loaded():
+                    print(
+                        "paneglow: loaded service has no recognized manifest",
+                        file=stderr,
+                    )
+                    return 1
+                service = None
+            else:
+                if service_manifest.status != "current":
+                    print(
+                        "paneglow: login autostart is stale or unsafe; reinstall it",
+                        file=stderr,
+                    )
+                    return 1
+                if not service.loaded():
+                    service.bootstrap()
+                # A successful bootstrap may start KeepAlive immediately, and
+                # an already-loaded job is ours once this start command elects
+                # to kick it. Any later failure must boot it out.
+                service_activated = True
+                service.kickstart()
+                identity = _wait_service_ready(
+                    paths, timeout=timeout, status_poll_ms=poll_ms
+                )
+                if identity is None:
+                    service.bootout()
+                    _wait_runtime_stopped(paths, timeout)
+                    print(
+                        "paneglow: LaunchAgent daemon did not become ready",
+                        file=stderr,
+                    )
+                    return 1
+                print(f"paneglow: started (pid {identity.pid})", file=stdout)
+                return 0
+        except (OSError, RuntimeError, launch_agent.LaunchAgentError):
+            if service_activated and service is not None:
+                try:
+                    if service.loaded():
+                        service.bootout()
+                        _wait_runtime_stopped(paths, timeout)
+                except launch_agent.LaunchAgentError:
+                    pass
+            print("paneglow: could not inspect or start login autostart", file=stderr)
+            return 1
 
     command = (*_absolute_command_prefix(), "run")
     log_fd = -1
@@ -1788,8 +2271,37 @@ def _cmd_start(paths: RuntimePaths, timeout: float, *,
         time.sleep(0.05)
 
 
-def _cmd_stop(paths: RuntimePaths, timeout: float, *,
-              stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
+def _cmd_start(paths: RuntimePaths, timeout: float, *,
+               stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
+    from paneglow import launch_agent
+
+    try:
+        spec = _launch_agent_spec(paths)
+    except launch_agent.LaunchAgentError:
+        # Explicit custom/manual runtimes outside the login-home LaunchAgent
+        # boundary retain the historical detached lifecycle.
+        return _cmd_start_locked(
+            paths, timeout, stdout=stdout, stderr=stderr, manual_only=True
+        )
+    try:
+        launch_agent.ensure_lock_directory(spec)
+        with launch_agent.InstallLock(spec):
+            return _cmd_start_locked(
+                paths, timeout, stdout=stdout, stderr=stderr
+            )
+    except launch_agent.LaunchAgentError:
+        target = sys.stderr if stderr is None else stderr
+        print("paneglow: autostart lifecycle is unsafe", file=target)
+        return 1
+    except (OSError, BlockingIOError):
+        target = sys.stderr if stderr is None else stderr
+        print("paneglow: autostart lifecycle is busy or unsafe", file=target)
+        return 1
+
+
+def _cmd_stop_runtime(paths: RuntimePaths, timeout: float, *,
+                      stdout: TextIO | None = None,
+                      stderr: TextIO | None = None) -> int:
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
     transition = _LifetimeLock(paths.transition_lock_path)
@@ -1852,6 +2364,74 @@ def _cmd_stop(paths: RuntimePaths, timeout: float, *,
             print("paneglow: SIGTERM timed out; no SIGKILL was sent", file=stderr)
             return 1
         time.sleep(0.05)
+
+
+def _wait_runtime_stopped(paths: RuntimePaths, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            held = _lock_is_held(paths.lock_path)
+        except RuntimeDataError:
+            return False
+        if not held:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _cmd_stop(paths: RuntimePaths, timeout: float, *,
+              stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
+    """Stop launchd-owned jobs with bootout; signal only detached daemons."""
+    from paneglow import launch_agent
+
+    stdout = sys.stdout if stdout is None else stdout
+    stderr = sys.stderr if stderr is None else stderr
+    try:
+        spec = _launch_agent_spec(paths)
+    except launch_agent.LaunchAgentError:
+        return _cmd_stop_runtime(
+            paths, timeout, stdout=stdout, stderr=stderr
+        )
+    try:
+        launch_agent.ensure_lock_directory(spec)
+        with launch_agent.InstallLock(spec):
+            manifest = launch_agent.inspect_manifest(spec)
+            if manifest.status == "missing":
+                service = launch_agent.Controller(spec)
+                if service.loaded():
+                    print(
+                        "paneglow: loaded service has no recognized manifest; "
+                        "no signal was sent",
+                        file=stderr,
+                    )
+                    return 1
+                return _cmd_stop_runtime(
+                    paths, timeout, stdout=stdout, stderr=stderr
+                )
+            if not manifest.owned:
+                print(
+                    "paneglow: login autostart is unsafe; no signal was sent",
+                    file=stderr,
+                )
+                return 1
+            service = launch_agent.Controller(spec)
+            if not service.loaded():
+                return _cmd_stop_runtime(
+                    paths, timeout, stdout=stdout, stderr=stderr
+                )
+            service.bootout()
+            if not _wait_runtime_stopped(paths, timeout):
+                print(
+                    "paneglow: LaunchAgent stop timed out; no direct signal was sent",
+                    file=stderr,
+                )
+                return 1
+            print("paneglow: stopped", file=stdout)
+            return 0
+    except (OSError, BlockingIOError, launch_agent.LaunchAgentError):
+        print("paneglow: autostart lifecycle is busy or unsafe", file=stderr)
+        return 1
 
 
 def _runtime_identity(paths: RuntimePaths, *, status_poll_ms: int,
@@ -2454,9 +3034,13 @@ def _build_parser():
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("hook", help="consume one Claude hook event (always succeeds)")
     commands.add_parser("run", help="run the daemon in the foreground")
-    start = commands.add_parser("start", help="start a detached daemon")
+    start = commands.add_parser(
+        "start", help="start the daemon using its installed lifecycle owner"
+    )
     start.add_argument("--timeout", type=float, default=5.0)
-    stop = commands.add_parser("stop", help="stop the verified daemon with SIGTERM")
+    stop = commands.add_parser(
+        "stop", help="stop the verified daemon without force killing"
+    )
     stop.add_argument("--timeout", type=float, default=5.0)
     commands.add_parser("status", help="read the daemon runtime snapshot")
     trace = commands.add_parser(
@@ -2466,6 +3050,23 @@ def _build_parser():
     trace.add_argument("--max-events", type=int, default=32)
     commands.add_parser("doctor", help="check configuration and integration")
     commands.add_parser("install-hooks", help="merge all Claude hook events")
+    autostart = commands.add_parser(
+        "autostart", help="manage the per-user login LaunchAgent"
+    )
+    autostart_commands = autostart.add_subparsers(
+        dest="autostart_command", required=True
+    )
+    autostart_install = autostart_commands.add_parser(
+        "install", help="install and start login autostart"
+    )
+    autostart_install.add_argument("--timeout", type=float, default=10.0)
+    autostart_commands.add_parser(
+        "status", help="inspect login autostart without changing it"
+    )
+    autostart_uninstall = autostart_commands.add_parser(
+        "uninstall", help="stop and remove login autostart"
+    )
+    autostart_uninstall.add_argument("--timeout", type=float, default=5.0)
     return parser
 
 
@@ -2498,6 +3099,12 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if parsed.command == "autostart" \
+            and parsed.autostart_command in {"install", "uninstall"} \
+            and (not math.isfinite(parsed.timeout) or parsed.timeout < 0):
+        print("paneglow: --timeout must be a finite non-negative number",
+              file=sys.stderr)
+        return 2
 
     paths = RuntimePaths.from_env()
     if parsed.command == "run":
@@ -2514,6 +3121,13 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_doctor(paths)
     if parsed.command == "install-hooks":
         return _cmd_install_hooks(paths)
+    if parsed.command == "autostart":
+        if parsed.autostart_command == "install":
+            return _cmd_autostart_install(paths, parsed.timeout)
+        if parsed.autostart_command == "status":
+            return _cmd_autostart_status(paths)
+        if parsed.autostart_command == "uninstall":
+            return _cmd_autostart_uninstall(paths, parsed.timeout)
     parser.print_help()
     return 0
 
