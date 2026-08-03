@@ -8,27 +8,21 @@ from paneglow.config import Config, load
 
 def test_missing_file_gives_defaults(tmp_path: Path):
     cfg, warnings = load(tmp_path / "nope.json")
-    assert cfg.mod_key == "C7"
     assert cfg.gate_mode == "frontmost"
+    assert cfg.slots_order == "recent_sticky"
     assert warnings == []
 
 
 def test_user_values_override(tmp_path: Path):
     p = tmp_path / "config.json"
-    p.write_text(json.dumps({"mod_key": "C4", "timing": {"poll_ms": 500}}))
+    p.write_text(json.dumps({
+        "gate": {"mode": "always"},
+        "timing": {"poll_ms": 500},
+    }))
     cfg, _ = load(p)
-    assert cfg.mod_key == "C4"
+    assert cfg.gate_mode == "always"
     assert cfg.poll_ms == 500
-    assert cfg.gate_mode == "frontmost"      # untouched values keep defaults
-
-
-def test_shared_keycap_is_rejected_with_warning(tmp_path: Path):
-    """C5 and C6 share one wide keycap, so pressing it reports both ids."""
-    p = tmp_path / "config.json"
-    p.write_text(json.dumps({"mod_key": "C5"}))
-    cfg, warnings = load(p)
-    assert cfg.mod_key == "C7"
-    assert any("C5" in w for w in warnings)
+    assert cfg.slots_order == "recent_sticky"  # untouched values keep defaults
 
 
 def test_bad_value_falls_back_and_warns(tmp_path: Path):
@@ -43,17 +37,8 @@ def test_broken_json_does_not_raise(tmp_path: Path):
     p = tmp_path / "config.json"
     p.write_text("{not json")
     cfg, warnings = load(p)
-    assert cfg.mod_key == "C7"
+    assert cfg.gate_mode == "frontmost"
     assert warnings != []
-
-
-def test_keep_is_only_allowed_for_other(tmp_path: Path):
-    """keep refers to the previous state, so it only means anything for when_other."""
-    p = tmp_path / "config.json"
-    p.write_text(json.dumps({"underglow": {"when_iterm": {"mode": "keep"}}}))
-    cfg, warnings = load(p)
-    assert cfg.underglow_iterm == "outside"
-    assert any("keep" in w for w in warnings)
 
 
 def test_non_numeric_timing_falls_back_instead_of_crashing(tmp_path: Path):
@@ -71,12 +56,11 @@ def test_non_numeric_timing_falls_back_instead_of_crashing(tmp_path: Path):
     "[]",                                        # root is not an object
     '"just a string"',                           # root is a scalar
     '{"gate": []}',                              # section is not an object
-    '{"mod_key": []}',                           # unhashable -- `[] in {...}` raises
-    '{"mod_key": 7}',                            # wrong scalar type
-    '{"underglow": {"when_iterm": []}}',         # nested section is not an object
+    '{"gate": {"mode": []}}',                    # enum value is unhashable
+    '{"gate": {"mode": 7}}',                     # enum has wrong scalar type
+    '{"underglow": {"effects": []}}',             # nested section is not an object
     '{"timing": {"poll_ms": 1e400}}',            # overflows int()
     '{"timing": {"poll_ms": true}}',             # bool is an int in Python
-    '{"tab_switch": {"knob": "false"}}',         # truthy string
     '{"gate": {"yield_to": "com.openai.chat"}}',  # bare string, not a list
     '{"gate": {"own_when": [1, 2]}}',            # list of non-strings
 ])
@@ -95,22 +79,6 @@ def test_bare_string_is_not_shredded_into_characters(tmp_path: Path):
     p.write_text(json.dumps({"gate": {"yield_to": "com.openai.chat"}}))
     cfg, _ = load(p)
     assert cfg.yield_to == ("com.openai.codex",)
-
-
-def test_string_false_does_not_enable_the_option(tmp_path: Path):
-    p = tmp_path / "config.json"
-    p.write_text(json.dumps({"tab_switch": {"knob": "false"}}))
-    cfg, _ = load(p)
-    assert cfg.knob_tab_switch is True   # default, not the truthy string
-
-
-def test_real_booleans_still_work(tmp_path: Path):
-    p = tmp_path / "config.json"
-    p.write_text(json.dumps({"tab_switch": {"knob": False, "mod_direct": False}}))
-    cfg, warnings = load(p)
-    assert cfg.knob_tab_switch is False
-    assert cfg.mod_direct_tab is False
-    assert warnings == []
 
 
 @pytest.mark.parametrize("value", [0, -100, 0.5, -1])
@@ -147,6 +115,19 @@ def test_desktop_defaults_and_status_poll_cadence():
     assert cfg.slots_order == "recent_sticky"
     assert cfg.status_poll_ms == 1000
     assert warnings == []
+
+
+def test_removed_iterm_and_tab_settings_are_not_part_of_config():
+    cfg = Config()
+    for name in (
+        "mod_key",
+        "knob_tab_switch",
+        "mod_direct_tab",
+        "underglow_iterm",
+        "legacy_underglow_codex_mode",
+        "mod_release_timeout_ms",
+    ):
+        assert not hasattr(cfg, name)
 
 
 def test_ownership_colours_and_effects_use_measured_defaults():
@@ -240,24 +221,3 @@ def test_new_numeric_bounds_fall_back_and_warn(tmp_path: Path, section, key, val
     attr = key
     assert getattr(cfg, attr) == default
     assert any(key in warning for warning in warnings)
-
-
-def test_new_and_legacy_settings_can_coexist(tmp_path: Path):
-    p = tmp_path / "config.json"
-    p.write_text(json.dumps({
-        "mod_key": "C4",
-        "tab_switch": {"knob": False, "mod_direct": False},
-        "underglow": {
-            "codex": "#010203",
-            "when_iterm": {"mode": "off"},
-            "when_codex": {"mode": "off"},
-        },
-    }))
-    cfg, warnings = load(p)
-    assert cfg.mod_key == "C4"
-    assert cfg.knob_tab_switch is False
-    assert cfg.mod_direct_tab is False
-    assert cfg.underglow_iterm == "off"
-    assert cfg.legacy_underglow_codex_mode == "off"
-    assert cfg.underglow_codex == 0x010203
-    assert warnings == []

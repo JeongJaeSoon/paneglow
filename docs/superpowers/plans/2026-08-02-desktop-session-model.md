@@ -1794,29 +1794,24 @@ git commit -m "refactor: remove the iTerm2 adapter and its dependency"
 
 - [ ] **Step 1: 훅을 설치한다**
 
-`~/.claude/settings.json` 에 추가한다. 모든 이벤트가 같은 커맨드로 간다.
+기존 설정을 직접 덮어쓰지 않고 원자적 installer를 쓴다.
 
-```json
-{
-  "hooks": {
-    "SessionStart":        [{"hooks":[{"type":"command","command":"paneglow hook"}]}],
-    "UserPromptSubmit":    [{"hooks":[{"type":"command","command":"paneglow hook"}]}],
-    "PreToolUse":          [{"hooks":[{"type":"command","command":"paneglow hook"}]}],
-    "PostToolUse":         [{"hooks":[{"type":"command","command":"paneglow hook"}]}],
-    "PostToolUseFailure":  [{"hooks":[{"type":"command","command":"paneglow hook"}]}],
-    "Notification":        [{"hooks":[{"type":"command","command":"paneglow hook"}]}],
-    "Stop":                [{"hooks":[{"type":"command","command":"paneglow hook"}]}],
-    "StopFailure":         [{"hooks":[{"type":"command","command":"paneglow hook"}]}],
-    "SessionEnd":          [{"hooks":[{"type":"command","command":"paneglow hook"}]}]
-  }
-}
+```bash
+paneglow install-hooks
 ```
+
+installer는 정확히 11개 이벤트를 병합한다: `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+`PostToolUse`, `PostToolUseFailure`, `PermissionDenied`, `Notification`, `Stop`, `StopFailure`,
+`PreCompact`, `SessionEnd`. 원본 설정이 있으면 `settings.json.paneglow.bak`을 만들고, 같은
+환경에서 재실행하면 byte-idempotent여야 한다.
 
 - [ ] **Step 2: 데몬을 띄우고 시나리오를 돌린다**
 
 ```bash
-paneglow doctor      # 전부 초록인지
+paneglow doctor      # stopped 상태의 fresh device.status 왕복
 paneglow start
+paneglow doctor      # running snapshot과 Desktop mapping
+paneglow status
 ```
 
 순서대로 확인하고 각 결과를 `first-light.md` 에 적는다.
@@ -1834,7 +1829,7 @@ paneglow start
 | 9 | Codex 를 보는 중에 Claude 가 승인을 기다린다 | 테두리가 **파란색으로 깜빡인다** |
 | 10 | Chrome 으로 전환한다 | 직전 소유권이 유지된다 |
 | 11 | 터치 센서로 Layer 2 로 간다 | 6키가 조용해진다 |
-| 12 | `paneglow stop` | **6키와 테두리가 꺼진 채로 남는다** (flush 확인) |
+| 12 | `paneglow stop` | 검증된 Layer 1에서 Claude 소유 A존과 테두리를 끄고 flush. Codex 소유 A존은 보존 |
 | 13 | 무선으로 바꾸고 1~12 를 반복한다 | 동일 |
 
 - [ ] **Step 3: 목표 지연을 잰다**
@@ -1844,7 +1839,8 @@ paneglow start
 | 상태 변화 → LED | 500ms 이내 |
 | A키 press → 세션 열림 | 150ms 이내 |
 
-못 지키면 `poll_ms` 를 늘리고 LED 갱신을 합친다. 결과를 기록한다.
+못 지키면 상태 수집, HID poll, 딥링크 실행을 분리 측정한다. 병목에 따라 cadence를 줄이거나
+딥링크/LED 갱신을 최적화하고 결과를 기록한다.
 
 - [ ] **Step 4: 결과를 커밋한다**
 
