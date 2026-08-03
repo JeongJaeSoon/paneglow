@@ -30,6 +30,88 @@
 
 ---
 
+## 실행 인수인계 보정 (2026-08-03)
+
+PR #15를 만든 Claude Code 세션의 전체 대화와 실측 프로브를 다시 대조하면서, 아래 누락을
+발견했다. **이 절은 뒤의 예시 코드와 충돌할 때 우선한다.** 뒤의 코드는 태스크 경계를 보여주는
+초안이고, 각 PR의 테스트와 실제 동작이 최종 계약이다.
+
+1. **"최근"은 시작 시각이 아니라 활동 시각이다.** 슬롯 입력값은 상태 레코드가 있으면
+   `record.updated_at`, 아직 훅 상태가 없으면 `session.started_at`을 쓴다. 뒤 Task 10처럼 항상
+   `started_at`만 넘기면 오래된 세션이 방금 `waiting`이 되어도 "가장 오래 조용한 세션"으로
+   잘못 축출된다. 상태 변경 뒤 슬롯 유지·축출을 검증하는 테스트를 추가한다.
+2. **상태 레코드에는 `pid`도 필요 없다.** 훅 payload에는 Claude 프로세스 PID가 없고 훅 프로세스의
+   부모 PID를 기록해도 거짓 데이터다. 생존 판단은 `~/.claude/sessions/*.json`이 전담한다.
+   `SessionRecord`는 `session_id`, `cwd`, `state`, `rev`, `updated_at`만 가진다. `paneglow hook`은
+   payload를 받은 시점의 `time.time_ns()`를 `rev`로, `time.time()`을 `updated_at`으로 쓰며 어떤
+   입력 오류에서도 0을 반환한다. `agent_type` 키가 존재하면 값의 truthiness와 무관하게 서브에이전트
+   이벤트로 보고 버리고, `PermissionDenied`도 관측 문서대로 `ERROR`에 포함한다. `SessionEnd`는
+   상태를 덮지 않고 authoritative 세션 스캔의 prune에 맡긴다.
+3. **R2 키 입력 경로를 daemon에 반드시 구현한다.** `v.oai.hid`의 `AG00`~`AG05`, `act == 1`만
+   슬롯 0~5에 매핑한다. 현재 소유권이 `claude`이고 마지막으로 왕복 검증한 layer가 1일 때만
+   `deeplink.open_session()`을 호출한다. release·노브·C키·Codex 양보 중 입력은 버린다.
+4. **레이어·연결 상태는 추정하지 않는다.** 기동과 재연결 때 `device.status` 왕복이 성공하기
+   전에는 LED와 입력을 arm하지 않는다. `layer_index != 1`이면 6키를 쓰지 않고 입력도 버린다.
+   disconnect, sleep/wake, callback 오류 뒤에는 기존 매핑을 폐기하고 HID를 다시 열어 status 왕복
+   후 전체 재도색한다. 연결 중에도 기본 1초 cadence로 status를 갱신하고, timeout 동안은 이전
+   layer를 계속 믿지 않고 fail-closed한다. Layer 1→2→1 전환과 timeout을 fake clock/pad 및
+   실기 양쪽에서 검증한다.
+5. **Task 11은 hook 두 테스트로 끝나지 않는다.** `run`(foreground), `start`, `stop`, `status`,
+   `doctor`, `hook`, `install-hooks`를 구현한다. 단일 인스턴스 PID/lock, SIGTERM 종료, 종료 시
+   `Pad.close()` flush, 원자적 runtime snapshot, 기존 Claude hooks를 보존하는 병합 설치와 백업을
+   각각 테스트한다. `status`는 snapshot을 읽고, `doctor`는 패드 왕복·Transport·세션 디렉터리·
+   딥링크 매핑·훅 설치를 실제로 점검한다. installer의 이벤트 목록은 `SessionStart`,
+   `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`,
+   `Notification`, `Stop`, `StopFailure`, `PreCompact`, `SessionEnd`이고, 각각 기존 hook을 보존한다.
+6. **frontmost 판별은 실제 무권한 경로를 남긴다.** 표준 라이브러리만 유지하므로 AppKit Python
+   패키지를 가정하지 않는다. Objective-C runtime을 `ctypes`로 호출하거나, 실기 검증한 macOS
+   내장 폴백을 쓰고 Claude/Codex/그 외 전환을 통합 테스트한다.
+7. **Task 9의 `...`는 완료 코드가 아니다.** callback과 report buffer의 수명, CF 객체 release,
+   run-loop schedule/unschedule, `IOHIDDeviceSetReport` 오류, 요청 id 상관관계, idempotent close,
+   마지막 write flush까지 구현·테스트한다. 유선과 BLE 각각 `device.status` 왕복이 통과해야 PR을
+   머지한다. 실측 scratchpad의 `padprobe.py`는 VID/PID로 찾은 뒤 다시 잘못된
+   `PrimaryUsagePage == 0xFF00` 필터를 적용하므로 **복사하지 않는다**. VID/PID-only인
+   `border_demo.py`의 discovery를 출발점으로 삼되 Transport 누락 시 USB 폴백은 제거한다.
+   CFUNCTYPE input/removal callback, report buffer, run loop와 mode를 `Pad`가 강하게 보관하고,
+   open/schedule/poll/unschedule/close를 같은 thread/run loop에서 수행한다. close는 write flush의
+   성공 여부와 무관하게 `finally`에서 callback 해제 → unschedule → `IOHIDDeviceClose` →
+   `CFRelease` 순으로 끝낸다.
+8. **세션 스캔은 결과와 신뢰도를 함께 돌려준다.** 디렉터리 부재·전체 파싱 실패와 "살아 있는
+   세션이 실제로 0개"를 모두 `[]`로 합치면 daemon이 `live_ids=set()`을 넘겨 정상 상태 파일까지
+   즉시 지운다. `sessions.scan()`은 `sessions`, `authoritative`, 진단을 담은 snapshot을 반환하고,
+   신뢰할 수 없을 때만 `store.prune(..., live_ids=None)`의 TTL 폴백을 사용한다.
+9. **시간 기반 설정을 실제 표시 경로에 적용한다.** `WORKING`이 `working_max_seconds`를 넘으면
+   파생 표시 상태를 `IDLE`로 내리고, `DONE`은 `done_fade_seconds` 뒤 소등한다. 원본 store
+   레코드는 바꾸지 않는다. `WAITING`·`ERROR`는 만료시키지 않는다. 경계값과 0초 설정을 테스트한다.
+10. **repaint는 원인과 존별로 나눈다.** 세션/상태/슬롯/소유권/layer 변화는 즉시 원하는 상태를
+    다시 그린다. 외부 `rgbcfg`/`lights.preview` ACK는 ambient만 되찾고, 외부 `thstatus` ACK는
+    Claude 소유일 때만 A존을 되찾는다. Codex 소유 중 외부 `thstatus`에 반응해 6키를 소등하면
+    벤더의 정상 표시를 깨므로 반드시 무시한다.
+11. **입력 실패 피드백과 runtime 진단도 계약이다.** 매핑 없음·`open` 실패 시 ambient를 0.3초
+    움직인 뒤 직전 표시로 복구한다. 모든 state diff와 pad 연결 epoch를 원자적 snapshot에 남겨
+    `status`가 예시 문자열이 아니라 실제 실행 상태를 설명하게 한다. GUI hook은 셸 `PATH`를
+    가정하지 않고 설치 시 해석한 실행 파일 절대 경로를 기록한다.
+
+### 순차 PR 경계
+
+1. 이 구현 계획 인수인계
+2. `protocol` 전송 정규화·LED 효과 (#16)
+3. `store`·`render`·`config` 세션 어휘 전환 (#17, #14). 이 단계에서는 전체 테스트를 위해
+   구 `Pane` API를 deprecated 호환 shim으로 유지한다
+4. `sessions`·`slots`와 실제 활동 시각 (#18)
+5. `deeplink` (#19)
+6. `hook` (#5)
+7. `pad`와 유선·무선 왕복 (#10)
+8. `daemon`의 게이트·키 입력·재연결·테두리 되찾기 (#20)
+9. `cli` lifecycle·doctor·hook 설치 (#21)
+10. 호환 shim과 iTerm2 제거, 패키징 (#22)
+11. 설치·첫 빛·실사용 검증 (#11)
+
+각 PR은 해당 테스트와 전체 비통합 테스트를 통과시키고, 열린 review thread와 실패한 check가
+없음을 확인한 뒤 squash merge한다. 다음 PR은 갱신된 `main`에서 시작한다.
+
+---
+
 ## 파일 구조
 
 | 파일 | 책임 | 상태 |
