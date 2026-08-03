@@ -10,12 +10,9 @@ from pathlib import Path
 from paneglow.protocol import EFFECTS
 
 _GATE_MODES = {"frontmost", "always", "off"}
-_UNDERGLOW_MODES = {"outside", "all_claude", "current_tab", "off"}
 _SCOPES = {"outside", "all_sessions", "off"}
 _SLOT_ORDERS = {"recent_sticky", "recent", "priority"}
 _LAYER_UNDERGLOW = {"keep", "off"}
-#: C5 and C6 share one wide keycap, so pressing it reports both ids.
-_MOD_KEYS = {"C1", "C2", "C3", "C4", "C7", "KNOB_PRESS"}
 _HEX_COLOUR = re.compile(r"#[0-9a-fA-F]{6}")
 
 
@@ -38,14 +35,6 @@ class Config:
     working_max_seconds: int = 900
     poll_ms: int = 250
     status_poll_ms: int = 1000
-
-    # Deprecated iTerm settings kept readable until the compatibility cleanup.
-    mod_key: str = "C7"
-    knob_tab_switch: bool = True
-    mod_direct_tab: bool = True
-    underglow_iterm: str = "outside"
-    legacy_underglow_codex_mode: str = "all_claude"
-    mod_release_timeout_ms: int = 5000
 
 
 def _reject(value, default, label: str, warnings: list[str]):
@@ -96,15 +85,6 @@ def _int(source: dict, key: str, default: int, label: str,
     return number
 
 
-def _bool(source: dict, key: str, default: bool, label: str,
-          warnings: list[str]) -> bool:
-    """Only real JSON booleans. bool("false") is True, which is never what was meant."""
-    if key not in source:
-        return default
-    value = source[key]
-    return value if isinstance(value, bool) else _reject(value, default, label, warnings)
-
-
 def _strings(value, default: tuple[str, ...], label: str,
              warnings: list[str]) -> tuple[str, ...]:
     """A list of strings. A bare string would otherwise be shredded into characters."""
@@ -152,7 +132,6 @@ def load(path: Path | None) -> tuple[Config, list[str]]:
     state = _section(raw, "state", "state", warnings)
     slots = _section(raw, "slots", "slots", warnings)
     layer = _section(raw, "layer_gate", "layer_gate", warnings)
-    tabs = _section(raw, "tab_switch", "tab_switch", warnings)
 
     effects_section = _section(glow, "effects", "underglow.effects", warnings)
     effects = {
@@ -199,16 +178,4 @@ def load(path: Path | None) -> tuple[Config, list[str]]:
                      warnings, minimum=1),
         status_poll_ms=_int(timing, "status_poll_ms", 1000,
                             "timing.status_poll_ms", warnings, minimum=1),
-        mod_key=_pick(raw.get("mod_key"), _MOD_KEYS, "C7", "mod_key", warnings),
-        knob_tab_switch=_bool(tabs, "knob", True, "tab_switch.knob", warnings),
-        mod_direct_tab=_bool(tabs, "mod_direct", True, "tab_switch.mod_direct", warnings),
-        underglow_iterm=_pick(
-            _section(glow, "when_iterm", "underglow.when_iterm", warnings).get("mode"),
-            _UNDERGLOW_MODES, "outside", "underglow.when_iterm.mode", warnings),
-        legacy_underglow_codex_mode=_pick(
-            _section(glow, "when_codex", "underglow.when_codex", warnings).get("mode"),
-            _UNDERGLOW_MODES, "all_claude", "underglow.when_codex.mode", warnings),
-        mod_release_timeout_ms=_int(timing, "mod_release_timeout_ms", 5000,
-                                    "timing.mod_release_timeout_ms",
-                                    warnings, minimum=1),
     ), warnings

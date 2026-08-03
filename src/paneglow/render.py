@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, TypeVar
 
-from paneglow.state import AgentState, highest
+from paneglow.state import AgentState
 
 KEY_COUNT = 6
 
@@ -59,31 +59,6 @@ def alert_level(states: Iterable[AgentState | None]) -> str:
     return "alert" if any(state in _NOTABLE for state in states) else "normal"
 
 
-@dataclass(frozen=True)
-class Pane:
-    """Deprecated iTerm pane model kept until the compatibility cleanup."""
-
-    tty: str
-    is_claude: bool
-    state: AgentState | None
-
-
-def render_pane_view(panes: list[Pane]) -> list[int | None]:
-    """Six key colours in on-screen order. None means dark."""
-    out: list[int | None] = [None] * KEY_COUNT
-    for i, pane in enumerate(panes[:KEY_COUNT]):
-        if pane.is_claude and pane.state is not None:
-            out[i] = PALETTE[pane.state]
-    return out
-
-
 def overflow(items: list[_T]) -> list[_T]:
     """Items that did not fit on the six keys."""
     return list(items[KEY_COUNT:])
-
-
-def underglow_for(states: Iterable[AgentState]) -> int | None:
-    """The colour for something out of sight that wants me -- waiting or errored.
-    None when nothing does."""
-    top = highest(states)
-    return PALETTE[top] if top in _NOTABLE else None

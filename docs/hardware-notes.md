@@ -1,7 +1,7 @@
 # Codex Micro — 하드웨어 실측 노트
 
 > 이 기기에서 직접 확인한 사실만 적는다. 설계 결정은 여기 없다 —
-> [설계 문서](design.html)를 참조.
+> [현재 Desktop 세션 설계](superpowers/specs/2026-08-02-desktop-session-model-design.md)를 참조.
 >
 > **측정 환경**: macOS · VID `0x303A` / PID `0x8360` · firmware **v0.4.1** · 2026-07-25
 > 다른 펌웨어에서는 다를 수 있다.
@@ -252,8 +252,10 @@ Transport says 'Bluetooth Low Energy' -> try BLE first
   -> REPLY  fw=v0.4.1 layer=1 battery=98
 ```
 
-`"USB"`가 들어 있으면 USB, 아니면 BLE로 고르면 된다. 사용자가 유선↔무선을
-오가도 자동으로 맞는다.
+실측된 canonical 값은 `"USB"`와 `"Bluetooth Low Energy"`다. 현재 구현은 대소문자와
+주변 공백을 정규화하고 `"BLE"` 별칭도 받지만, 그 밖의 `Transport` 값은 추측하지 않고
+거부한다. 사용자가 유선↔무선을 오가면 다음 status 왕복에서 검증된 transport에 맞춰 다시
+연결한다.
 
 > **더 나은 신호일 가능성** (미확인): `MaxOutputReportSize`가 BLE에서 **64**로
 > 나왔다. USB에서 **63**이면 전송 이름을 볼 필요 없이 이 숫자를 프레임 크기로
@@ -323,6 +325,9 @@ ChatGPT 앱이 상태를 받아오는 경로. 우리도 붙을 수 있을지 모
 
 ## 6. iTerm2 쪽 실측
 
+> **역사 자료.** 이 절의 pane 모델은 Claude Code Desktop 세션 모델로 폐기되었다. 현재
+> paneglow는 iTerm2 패키지나 Python API를 사용하지 않으며 `EnableAPIServer`도 필요 없다.
+
 | 항목 | 결과 |
 |---|---|
 | AppleScript로 탭·pane·tty 조회 | ✅ |
@@ -343,7 +348,9 @@ ChatGPT 앱이 상태를 받아오는 경로. 우리도 붙을 수 있을지 모
 > **`jobName`으로 Claude Code pane을 식별할 수 있다** — 버전 문자열(`2.1.220` 형태)로 나온다.
 > 단 이 표기에 의존하므로 Claude Code 업데이트로 깨질 수 있다.
 
-Python API는 iTerm2 설정에서 활성화해야 한다(`EnableAPIServer`). 유닉스 소켓(`~/Library/Application Support/iTerm2/private/socket`)으로 붙으므로 **TCC 권한은 필요 없다.**
+당시 Python API 실측을 위해 iTerm2 설정의 `EnableAPIServer`를 활성화했다. 유닉스
+소켓(`~/Library/Application Support/iTerm2/private/socket`)으로 붙었으므로 TCC 권한은
+필요하지 않았다. 현재 paneglow 설치에는 이 설정이 필요 없다.
 
 ---
 

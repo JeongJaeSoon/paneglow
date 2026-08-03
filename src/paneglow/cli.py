@@ -1035,7 +1035,10 @@ def _cmd_run(paths: RuntimePaths, *, stdout: TextIO | None = None,
 
 
 def _absolute_command_prefix() -> tuple[str, ...]:
-    executable = Path(sys.executable).resolve()
+    # Keep a virtual environment's executable path intact.  Resolving its
+    # ``bin/python`` symlink selects the base interpreter, which then cannot
+    # import the package installed only in that environment.
+    executable = _absolute_path(sys.executable)
     if not executable.is_absolute():
         raise RuntimeError("Python executable is not absolute")
     return (str(executable), "-m", "paneglow.cli")
@@ -1355,6 +1358,63 @@ def _entry_has_command(value: object, command: str) -> bool:
     )
 
 
+def _is_paneglow_hook_command(value: object) -> bool:
+    """Recognize only the command shape emitted by this installer."""
+    if type(value) is not str:
+        return False
+    try:
+        arguments = shlex.split(value)
+    except ValueError:
+        return False
+    return (
+        len(arguments) == 4
+        and Path(arguments[0]).is_absolute()
+        and arguments[1:] == ["-m", "paneglow.cli", "hook"]
+    )
+
+
+def _generated_hook_entry(value: object, command: str | None = None) -> bool:
+    """Match the exact standalone entry Paneglow owns and may migrate."""
+    if type(value) is not dict or set(value) != {"hooks"}:
+        return False
+    hooks = value.get("hooks")
+    if type(hooks) is not list or len(hooks) != 1:
+        return False
+    hook = hooks[0]
+    if type(hook) is not dict or set(hook) != {"type", "command"} \
+            or hook.get("type") != "command":
+        return False
+    installed = hook.get("command")
+    if command is not None:
+        return installed == command
+    return _is_paneglow_hook_command(installed)
+
+
+def _normalize_hook_entries(
+    entries: list[object], command: str
+) -> tuple[list[object], bool]:
+    """Migrate and deduplicate only standalone entries owned by Paneglow."""
+    normalized: list[object] = []
+    installed = False
+    changed = False
+    canonical = _hook_entry(command)
+    for entry in entries:
+        if not _generated_hook_entry(entry):
+            normalized.append(entry)
+            continue
+        if installed:
+            changed = True
+            continue
+        normalized.append(canonical)
+        installed = True
+        if entry != canonical:
+            changed = True
+    if not installed:
+        normalized.append(canonical)
+        changed = True
+    return normalized, changed
+
+
 def _hooks_installed(settings: object, command: str) -> bool:
     if type(settings) is not dict or type(settings.get("hooks")) is not dict:
         return False
@@ -1362,7 +1422,9 @@ def _hooks_installed(settings: object, command: str) -> bool:
     for event in _HOOK_EVENTS:
         entries = hooks.get(event)
         if type(entries) is not list \
-                or not any(_entry_has_command(entry, command) for entry in entries):
+                or not any(
+                    _generated_hook_entry(entry, command) for entry in entries
+                ):
             return False
     return True
 
@@ -1386,10 +1448,10 @@ def _cmd_install_hooks(paths: RuntimePaths, *, stdout: TextIO | None = None,
             existing = merged.get(event, [])
             if type(existing) is not list:
                 raise RuntimeDataError("Claude hook event must be a list")
-            entries = list(existing)
-            if not any(_entry_has_command(item, command) for item in entries):
-                entries.append(_hook_entry(command))
-                changed = True
+            entries, event_changed = _normalize_hook_entries(
+                list(existing), command
+            )
+            changed = changed or event_changed
             merged[event] = entries
         if not changed:
             print("paneglow: hooks already installed", file=stdout)

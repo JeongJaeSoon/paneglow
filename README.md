@@ -1,79 +1,157 @@
 # paneglow
 
-> Codex Micro 매크로패드로 병렬 Claude Code Desktop 세션을 보고 다룬다.
+> Codex Micro 매크로패드로 병렬 Claude Code Desktop 세션을 보고 연다.
 
-6개 Agent 키가 **최근 세션들의 상태**를 색으로 보여주고, 누르면 그 세션이 앱에서 열린다.
-테두리는 **지금 6키가 Claude 것인지 Codex 것인지**를 말하고, 화면 밖에서 나를 기다리는
-것이 있으면 깜빡인다.
+6개 Agent 키가 최근 세션의 상태를 색으로 보여주고, 누르면 그 세션을 Claude Desktop에서
+연다. 테두리는 지금 Agent 키를 Claude와 Codex 중 누가 소유하는지 보여주며, 화면 밖 세션이
+응답을 기다리거나 오류 상태이면 효과로 알린다.
 
-macOS 전용. Codex Micro(VID `0x303A` / PID `0x8360`)가 필요하다. 유선·무선 둘 다 된다.
+macOS 전용이며 Python 3.10 이상, Claude Desktop, Codex Micro(VID `0x303A` / PID
+`0x8360`)가 필요하다. USB와 BLE를 모두 지원하고 별도 TCC 권한은 요구하지 않는다.
 
-```
+```text
         ◯ 노브      [A1] [A2]      ● 스틱          A1~A6  최근 세션 6개
         [A3] [A4]  [A5] [A6]                      누르면  그 세션이 앱에서 열린다
         [C1] [C2 ] [C3 ] [C4]                     C1~C7   건드리지 않는다
-        ⋮LED ◉터치  [═ C5+C6 ═]  [C7]             테두리   누구 것인가 + 알림
+        ⋮LED ◉터치  [═ C5+C6 ═]  [C7]             테두리   소유권 + 알림
 ```
 
-## 상태
+## 설치와 첫 실행
 
-**설계 재확정 완료, 하드웨어 연결 착수 전.** 관문 검증 셋이 전부 닫혔다.
-
-| 모듈 | |
-|---|---|
-| ✅ `state` `store` `render` `protocol` `config` | 순수 로직. 테스트 101개 |
-| ⬜ `sessions` | 살아 있는 세션 목록 |
-| ⬜ `slots` | 세션 → 6슬롯 배정. 순수 |
-| ⬜ `deeplink` | 세션을 앱에서 연다 |
-| ⬜ `hook` [#5](../../issues/5) | 훅 → 상태 분류 |
-| ⬜ `pad` [#10](../../issues/10) | IOKit |
-| ⬜ `cli` [#11](../../issues/11) | 첫 통합 |
-| ❌ `iterm` | 삭제 예정 — pane 도 탭도 안 쓴다 |
-
-실기와 앱 번들로 확인한 것 — 근거는 [하드웨어 노트](docs/hardware-notes.md)와
-[딥링크 실측](docs/verification/deeplink.md):
-
-| | |
-|---|---|
-| 세션 딥링크 | `claude://claude.ai/claude-code-desktop/<id>`. 다른 형태 6개는 실패, 그중 둘은 **조용히** |
-| `device.status` 왕복 | USB · BLE 양쪽 |
-| A1~A6 개별 색 · 키별 효과 | USB · BLE 양쪽 |
-| LED 효과 5종 | 켜짐 · 회전 · 무지개 · 깜빡임 · 펄스. **기기가 스스로 돌린다** |
-| 벤더가 쓰는 존 | 6키와 테두리는 쓴다. **C1~C7 은 안 건드린다** |
-| 테두리 되찾기 | 벤더 명령의 ACK 를 보고 이벤트 기반으로 |
-| TCC 권한 | **필요 없음** |
-
-- [설계 문서](docs/superpowers/specs/2026-08-02-desktop-session-model-design.md) — 결정과 근거
-- [훅 이벤트 검증](docs/verification/hook-events.md) — 설계 전제 셋이 뒤집힌 기록
-- [기존 설계](docs/design.html) — iTerm2 pane 모델. **대체됨**
+런타임 외부 의존성은 없다. 저장소를 계속 둘 위치에서 가상환경을 만들고 설치한다.
 
 ```bash
-python -m pytest tests/ -m "not integration"   # 하드웨어 없이
-python -m pytest tests/ -m integration         # 실기 필요
+git clone https://github.com/JeongJaeSoon/paneglow.git
+cd paneglow
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
 ```
 
-## 왜 만드나
+Claude Code 훅을 기존 설정에 병합하고 데몬을 시작한다.
 
-기존 도구([FreeMicro](https://github.com/eliBenven/freemicro))는 세션을 **디렉터리 단위로 합친다.**
-한 repo의 워크트리 여러 개에서 병렬로 돌리면 전부 키 하나에 뭉쳐서, 어느 세션이 나를
-기다리는지 알 수 없다. paneglow는 **세션 하나에 키 하나**를 준다.
+```bash
+.venv/bin/paneglow install-hooks
+.venv/bin/paneglow start
+.venv/bin/paneglow status
+.venv/bin/paneglow doctor
+```
 
-## 알아둘 것
+`install-hooks`는 `~/.claude/settings.json`의 기존 항목을 보존하고, 원본이 있으면
+`settings.json.paneglow.bak`을 만든다. 같은 환경에서 다시 실행해도 중복 설치되지 않는다.
+이전 Paneglow 버전이 남긴 잘못된 base-Python 훅도 현재 가상환경 경로 하나로 이관한다.
+훅에는 가상환경 Python의 절대 경로가 기록되므로, 훅을 사용하는 동안 저장소와 `.venv`를
+옮기거나 지우지 않는다.
 
-- **Layer 1에서만 동작한다.** 터치 센서로 Layer 2+로 넘기면 조용해지고 평범한 매크로패드가 된다.
-- **Codex 앱과 함께 쓸 수 있다.** Codex를 볼 때는 6키를 벤더에게 넘기고, 테두리가 지금 어느
-  쪽 상태를 보고 있는지 알려준다. 벤더가 테두리를 덮으면 되찾는다.
-- **C1~C7 은 사용자 것이다.** paneglow는 이 키들의 백라이트도 키맵도 건드리지 않는다.
-- **승인·거절은 없다.** 데스크톱 앱에는 세션에 응답을 보낼 수단이 없고, 남은 길은
-  Accessibility 권한뿐이라 "권한 없이 동작한다"는 원칙과 충돌한다.
-- **특별한 권한은 필요 없다.** 벤더 채널은 VID/PID로 이 기기만 열면 Input Monitoring 없이
-  읽고 쓴다. 상주 데몬은 필요하다.
-- **유선·무선 둘 다 된다.** 프레이밍이 다르지만(63B/64B) `Transport` 속성으로 자동 판별한다.
-  단, 그 값은 `"BLE"`가 아니라 `"Bluetooth Low Energy"` 다.
+설치되는 이벤트는 `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
+`PostToolUseFailure`, `PermissionDenied`, `Notification`, `Stop`, `StopFailure`,
+`PreCompact`, `SessionEnd`의 정확히 11개다.
 
-> ⚠️ Work Louder Input 앱의 **Setup 탭에서 펌웨어 플래싱을 누르지 말 것.**
-> 목록에 이 기기용이 없고, BLE 연결 중에는 앱이 "bootloader mode"로 오진한다.
-> 자세한 내용은 [하드웨어 노트](docs/hardware-notes.md).
+`doctor`가 실제 딥링크 매핑까지 확인하려면 Claude Desktop에서 Claude Code 세션 하나 이상이
+살아 있어야 한다. 발견된 **모든** live 세션에 Desktop mapping이 있어야 통과하므로, mapping이
+없는 CLI 세션이 함께 살아 있으면 실패로 보고한다. 세션이 없으면 매핑을 실행해 보지 못했다는
+경고를 낸다. 패드가 없어도 데몬은 상태 수집을 계속하며 재연결을 시도하지만, `doctor`의 패드
+검사는 실패한다.
+
+로그인 후 자동 시작은 아직 제공하지 않는다. 재부팅 뒤에는 다음 명령을 다시 실행한다.
+
+```bash
+.venv/bin/paneglow start
+```
+
+종료와 상태 확인은 하드웨어를 열지 않는 별도 명령이다.
+
+```bash
+.venv/bin/paneglow status
+.venv/bin/paneglow stop
+```
+
+데몬 로그는 `~/.paneglow/logs/daemon.log`에 기록된다.
+
+## 선택 설정
+
+설정 파일은 `~/.paneglow/config.json`이다. 파일이 없으면 측정된 기본값을 사용하며, 잘못된
+항목 하나는 그 항목만 기본값으로 되돌리고 데몬 기동을 막지 않는다.
+
+```json
+{
+  "gate": {
+    "mode": "frontmost",
+    "own_when": ["com.anthropic.claudefordesktop"],
+    "yield_to": ["com.openai.codex"]
+  },
+  "slots": {"order": "recent_sticky"},
+  "layer_gate": {"underglow": "keep"},
+  "underglow": {
+    "claude": "#FF6D00",
+    "codex": "#304FFE",
+    "effects": {"normal": "solid", "alert": "blink", "fault": "rainbow"},
+    "scope": "outside",
+    "reclaim_delay_ms": 200
+  },
+  "state": {
+    "ttl_minutes": 30,
+    "done_fade_seconds": 180,
+    "working_max_seconds": 900
+  },
+  "timing": {"poll_ms": 250, "status_poll_ms": 1000}
+}
+```
+
+모든 값과 결정 근거는 [현재 설계 문서](docs/superpowers/specs/2026-08-02-desktop-session-model-design.md)에
+정리되어 있다.
+
+## 현재 구현 상태
+
+Claude Desktop 경로의 구현은 완료되어 있다.
+
+| 영역 | 상태 |
+|---|---|
+| 상태 저장·렌더링·설정·프로토콜 | ✅ 순수 로직과 회귀 테스트 |
+| live session 검색·sticky 6슬롯·딥링크 | ✅ Desktop 로컬 파일과 정확한 URL 매핑 |
+| 11개 Claude 훅·원자적 설치 | ✅ 훅 경로는 항상 무출력·종료 코드 0 |
+| macOS frontmost gate·USB/BLE IOKit | ✅ 별도 TCC 권한 없이 동작 |
+| 상주 daemon·start/stop/status/doctor | ✅ private snapshot과 fail-closed PID 전환 |
+| 로그인 시 자동 시작 | 미구현 — 현재는 `paneglow start` 수동 실행 |
+
+실기와 앱 번들로 확인한 근거는 [하드웨어 노트](docs/hardware-notes.md),
+[딥링크 실측](docs/verification/deeplink.md), [훅 이벤트 검증](docs/verification/hook-events.md)에
+남겨 두었다.
+
+| 확인 항목 | 결과 |
+|---|---|
+| 세션 딥링크 | `claude://claude.ai/claude-code-desktop/<local_id>` |
+| `device.status` 왕복 | USB · BLE 양쪽 |
+| A1~A6 개별 색과 효과 | USB · BLE 양쪽 |
+| LED 효과 | solid · spin · rainbow · blink · pulse |
+| 벤더가 쓰는 존 | Agent 키와 테두리. C1~C7은 paneglow가 건드리지 않음 |
+| 테두리 되찾기 | 벤더 ACK를 관찰한 이벤트 기반 reclaim |
+| 권한 | Accessibility · Input Monitoring · Screen Recording 불필요 |
+
+## 동작 원칙
+
+- **Layer 1에서만 동작한다.** Layer 2 이상에서는 Agent 키 입력과 표시를 포기한다.
+- **Codex 앱과 함께 쓸 수 있다.** Codex가 앞에 있으면 Agent 키를 양보하고 테두리만 소유권을
+  보여준다.
+- **C1~C7은 사용자 영역이다.** 백라이트와 키맵을 변경하지 않는다.
+- **승인·거절 기능은 없다.** 세션에 응답하려면 Accessibility가 필요해 권한 없는 동작 원칙과
+  충돌한다.
+- **잘못된 상태를 추측하지 않는다.** 세션 스캔, 패드 status, 레이어, PID 신원을 검증하지 못하면
+  해당 동작을 거부하고 `status` 또는 `doctor`에 이유를 남긴다.
+
+> ⚠️ Work Louder Input 앱의 **Setup 탭에서 펌웨어 플래싱을 누르지 말 것.** 목록에 Codex
+> Micro용 이미지가 없고 BLE 연결을 bootloader mode로 오진할 수 있다. 자세한 내용은
+> [하드웨어 노트](docs/hardware-notes.md)에 있다.
+
+## 개발·검증
+
+```bash
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pytest -m 'not integration' -q
+.venv/bin/python -m pytest -m integration -q  # 실제 Codex Micro 필요
+```
+
+이전 iTerm pane 설계는 현재 구현이 아니며, 의사결정 기록으로만
+[보존](docs/design.html)한다.
 
 ## 라이선스
 

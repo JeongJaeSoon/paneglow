@@ -1,11 +1,11 @@
 [project]
 name = "paneglow"
 version = "0.0.0"
-description = "Codex Micro macropad as a live dashboard for parallel Claude Code panes in iTerm2"
+description = "Codex Micro dashboard for parallel Claude Code Desktop sessions"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = ["iterm2>=2.7"]
+dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -20,4 +20,4 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-markers = ["integration: needs real iTerm2 or hardware"]
+markers = ["integration: needs a real Codex Micro"]

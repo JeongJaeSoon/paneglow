@@ -557,6 +557,21 @@ def test_start_uses_absolute_detached_prefix_and_waits_for_matching_readiness(
     assert "started" in output.getvalue()
 
 
+def test_command_prefix_preserves_virtualenv_executable_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    executable = tmp_path / "venv" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.symlink_to(Path(sys.executable))
+    monkeypatch.setattr(cli.sys, "executable", str(executable))
+
+    assert cli._absolute_command_prefix() == (
+        str(executable),
+        "-m",
+        "paneglow.cli",
+    )
+
+
 def test_start_never_reads_or_spawns_during_identity_transition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -777,6 +792,64 @@ def test_install_hooks_preserves_existing_content_backs_up_and_is_idempotent(
     installed_bytes = paths.claude_settings_path.read_bytes()
     backup_bytes = backup.read_bytes()
     assert cli._cmd_install_hooks(paths, stdout=output, stderr=io.StringIO()) == 0
+    assert paths.claude_settings_path.read_bytes() == installed_bytes
+    assert backup.read_bytes() == backup_bytes
+    assert "already installed" in output.getvalue()
+
+
+def test_install_hooks_migrates_resolved_venv_command_and_deduplicates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    paths = paths_for(tmp_path)
+    executable = tmp_path / "venv" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.symlink_to(Path(sys.executable))
+    monkeypatch.setattr(cli.sys, "executable", str(executable))
+    command = cli._hook_command()
+    legacy = shlex.join(
+        (str(executable.resolve()), "-m", "paneglow.cli", "hook")
+    )
+    assert legacy != command
+
+    unrelated = {
+        "matcher": "user-owned",
+        "hooks": [{"type": "command", "command": "/usr/bin/true"}],
+    }
+    original_value = {
+        "hooks": {
+            event: [cli._hook_entry(legacy)]
+            for event in cli._HOOK_EVENTS
+        }
+    }
+    original_value["hooks"]["Stop"].extend(
+        [cli._hook_entry(command), unrelated]
+    )
+    original = json.dumps(original_value, indent=2).encode()
+    paths.claude_settings_path.parent.mkdir(parents=True)
+    paths.claude_settings_path.write_bytes(original)
+
+    output = io.StringIO()
+    assert cli._cmd_install_hooks(
+        paths, stdout=output, stderr=io.StringIO()
+    ) == 0
+    installed_bytes = paths.claude_settings_path.read_bytes()
+    installed = json.loads(installed_bytes)
+    for event in cli._HOOK_EVENTS:
+        entries = installed["hooks"][event]
+        assert sum(
+            cli._generated_hook_entry(entry, command) for entry in entries
+        ) == 1
+        assert not any(cli._entry_has_command(entry, legacy) for entry in entries)
+    assert unrelated in installed["hooks"]["Stop"]
+
+    backup = paths.claude_settings_path.with_name(
+        paths.claude_settings_path.name + ".paneglow.bak"
+    )
+    assert backup.read_bytes() == original
+    backup_bytes = backup.read_bytes()
+    assert cli._cmd_install_hooks(
+        paths, stdout=output, stderr=io.StringIO()
+    ) == 0
     assert paths.claude_settings_path.read_bytes() == installed_bytes
     assert backup.read_bytes() == backup_bytes
     assert "already installed" in output.getvalue()

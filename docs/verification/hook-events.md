@@ -2,6 +2,10 @@
 
 > 이슈 #1. 설계 전체가 여기 걸려 있었다.
 > **측정**: 2026-07-26 · Claude Code 2.1.220 · 8개 세션 · 107건 수집
+>
+> **현재 모델 주의:** 페이로드 실측은 근거로 유지하지만 pane/`ITERM_SESSION_ID` 조인과
+> 승인 키 결론은 폐기되었다. 현재 구현은 hook `session_id`를 live Claude 세션 목록과
+> Claude Desktop 딥링크 매핑에 조인한다.
 
 수집 방법: `~/.claude/settings.json`에 관찰용 훅을 임시로 걸어 페이로드를 그대로 append.
 
@@ -11,17 +15,17 @@
 
 | 질문 | 답 | 영향 |
 |---|---|---|
-| `waiting`(승인 대기)를 판별할 수 있는가 | **✅ 가능** | 계획대로 진행. 승인 기능(C2/C3) 유지 |
+| `waiting`(승인 대기)를 판별할 수 있는가 | **✅ 가능** | 상태 표시에 사용. 승인 키 기능은 폐기 |
 | `error`를 구분할 수 있는가 | **✅ 가능** | `StopFailure`·`PostToolUseFailure` 별도 이벤트 |
-| `tty`를 얻을 수 있는가 | **❌ 불가** | 훅은 제어 터미널 없이 실행된다. `ITERM_SESSION_ID`로 대체 |
+| `tty`를 얻을 수 있는가 | **❌ 불가** | 현재 모델은 `session_id`로 live 세션과 조인 |
 | `session_id` · `cwd` | ✅ 모든 이벤트에 있음 | — |
 
 **추가 발견 둘:**
 
-- 서브에이전트가 **별도 `session_id`로 같은 pane에서** 이벤트를 낸다.
+- 서브에이전트가 **별도 `session_id`로 같은 상위 세션에서** 이벤트를 낸다.
   거르지 않으면 부모의 `waiting`을 덮어쓴다 (§4).
 - **`Stop`이 안 오는 경우가 있다** — 사용자가 ESC로 턴을 중단하면 아무 이벤트도 안 온다.
-  그러면 pane이 `working`에 갇힌다 (§7).
+  그러면 세션이 `working`에 갇힌다 (§7).
 
 > **1차 결론 중 둘이 틀렸다.** 로컬 관측만으로 판단했기 때문이다.
 > `error`는 `Stop` 페이로드에 필드가 없다는 것만 보고 불가로 판정했으나,
@@ -132,11 +136,11 @@ Skill   -> commandName, success        ← success 는 Skill 에만 있다
 
 ---
 
-## 4. 서브에이전트 — 걸러야 한다 ⚠️
+## 4. 서브에이전트 필터 — 실측 결론은 현재도 유효 ⚠️
 
 **계획서에 없던 문제.**
 
-서브에이전트는 **부모와 같은 pane에서 돌지만 `session_id`가 다르다.**
+당시 iTerm2 관측에서 서브에이전트는 **부모와 같은 pane에서 돌지만 `session_id`가 달랐다.**
 
 ```text
 46e739ff  PreToolUse   agent_type=claude  cwd=phone-link-data-split   31건
@@ -144,20 +148,24 @@ Skill   -> commandName, success        ← success 는 Skill 에만 있다
 46e739ff  PreToolUse   agent_type=claude  cwd=UsageLink                1건  ← cwd 가 바뀐다
 ```
 
-같은 tty에 레코드가 둘 생기고, `by_tty()`는 `updated_at` 최신을 고른다.
-서브에이전트가 부모보다 훨씬 자주 이벤트를 내므로 **화면에는 늘 서브에이전트 상태가 뜬다.**
+폐기된 `tty` 조인에서는 같은 tty에 레코드가 둘 생기고, `by_tty()`가 `updated_at` 최신을
+골랐다. 서브에이전트가 부모보다 훨씬 자주 이벤트를 내므로 화면에는 늘 서브에이전트 상태가
+뜨는 문제가 있었다.
 
 치명적인 경우: **부모가 `waiting`인데 서브에이전트가 `working`이면 주황이 파랑에 덮인다.**
 사용자가 승인을 기다리는 pane을 놓친다 — 이 프로젝트가 막으려는 바로 그 증상이다.
 
 `cwd`도 서브에이전트를 따라 바뀌므로 디렉터리 기반 식별도 안전하지 않다.
 
-**대응**: `agent_type`이 있는 이벤트는 상태로 쓰지 않는다.
+**현재 대응**: Desktop 세션 모델에서도 `agent_type`이 있는 이벤트는 상태로 쓰지 않는다.
 `SubagentStop`은 이미 무시 대상이고, `agent_type` 필드로 나머지도 거른다.
 
 ---
 
-## 5. pane 식별 — `tty`가 아니라 `ITERM_SESSION_ID` (설계 변경)
+## 5. 폐기된 pane 식별 결론 — 당시 `tty` 대신 `ITERM_SESSION_ID`
+
+> **현재 구현에는 적용하지 않는다.** 아래 내용은 iTerm pane 모델 안에서만 유효했던 중간
+> 결론이다. Desktop 모델은 hook `session_id`를 live 세션 목록과 딥링크 mapping에 조인한다.
 
 **`tty`는 얻을 수 없다.** 공식 문서:
 
@@ -168,7 +176,7 @@ Skill   -> commandName, success        ← success 는 Skill 에만 있다
 이 환경은 2.1.220이므로 해당된다. `ps -o tty= -p $$`는 `??`를 낸다.
 **설계 전체가 tty를 pane 키로 쓰고 있었으므로 대체가 필요하다.**
 
-### 대체 수단
+### 당시 대체 수단
 
 iTerm2는 각 pane의 셸에 `ITERM_SESSION_ID`를 심고, Claude Code가 이를 상속하며,
 훅도 "Claude Code's environment"로 실행되므로 그대로 받는다.
@@ -182,7 +190,7 @@ iTerm2 API  Session.session_id =      57437D3D-ED91-4B7D-BB91-844F603E6994
 `:` 앞은 `w<window>t<tab>p<pane>` 위치이고 **바뀔 수 있다.** 뒤의 GUID만 쓴다.
 실측으로 iTerm2 API의 `Session.session_id`와 정확히 일치함을 확인했다.
 
-### tty보다 나은 점
+### 당시 tty보다 나았던 점
 
 | | `tty` | `ITERM_SESSION_ID` |
 |---|---|---|
@@ -193,7 +201,7 @@ iTerm2 API  Session.session_id =      57437D3D-ED91-4B7D-BB91-844F603E6994
 pty 재활용이 없어지므로 `store.prune()`의 "재사용된 tty의 고아 정리" 로직이
 **불필요해진다.** `SessionRecord.tty`를 GUID로 바꾸면 그 분기를 덜어낼 수 있다.
 
-### 한계
+### 당시 한계
 
 - **iTerm2 전용이다.** 다른 터미널에서는 비어 있다. 이 프로젝트는 iTerm2 전용이므로 수용한다.
 - 백그라운드 잡(`claude bg-spare`)에는 없다. 어느 pane에도 없으므로 매핑하지 않는 것이 맞다.
@@ -246,10 +254,8 @@ pty 재활용이 없어지므로 `store.prune()`의 "재사용된 tty의 고아 
    `permission_prompt`·`agent_needs_input`일 때만 `WAITING`. 나머지는 `None`.
 2. **`error` 유지** — `StopFailure`·`PostToolUseFailure`를 `ERROR`로 매핑. 팔레트 5색 유지.
 3. **`record_from()`에 서브에이전트 필터** — `agent_type`이 있으면 `None`.
-4. **pane 키를 `tty`에서 `ITERM_SESSION_ID`의 GUID로 교체.**
-   `SessionRecord.tty` → `pane_id`. `iterm.py`도 `session.session_id`로 매칭.
-   `store.prune()`의 tty 재사용 분기는 제거 가능.
-   `_iterm`이 비면 레코드를 만들지 않는다(pane이 아니므로).
+4. ~~pane 키를 `tty`에서 `ITERM_SESSION_ID`의 GUID로 교체~~ — **폐기됨.** 현재 구현은
+   hook `session_id`를 live Desktop 세션과 조인하며 iTerm 환경변수를 읽지 않는다.
 5. **`working` 시간 상한** 도입 (§7).
 6. `pid`가 페이로드에 없으므로 `SessionRecord.pid`는 훅 프로세스의 pid다. 진단용.
 
@@ -287,7 +293,7 @@ pty 재활용이 없어지므로 `store.prune()`의 "재사용된 tty의 고아 
 811건 전부 `_tty=??`. 문서의 "hooks run without a controlling terminal"이 맞다.
 **tty 기반 pane 매핑은 불가능하다.**
 
-### `_iterm`은 pane 세션에서만 채워진다
+### 당시 `_iterm`은 pane 세션에서만 채워졌다
 
 빈 경우가 대부분이었으나 이는 결함이 아니라 정확한 동작이다.
 tty를 가진 claude 프로세스는 4개뿐이고 **전부** `ITERM_SESSION_ID`를 갖는다:
@@ -299,12 +305,13 @@ pid=61943 ttys004  ITERM_SESSION_ID=w0t0p0:04E8E4A6-…   ← 훅 기록의 _ite
 
 나머지는 `bg-pty-host`·`bg-spare`·데스크톱 앱 헬퍼로 **애초에 pane이 아니다.**
 
-| 세션 종류 | `_iterm` | 옳은 동작 |
+| 당시 세션 종류 | `_iterm` | 당시 결론 |
 |---|---|---|
 | iTerm2 pane의 대화형 세션 | 있음 | 키에 배정 |
 | 백그라운드 잡 · 데스크톱 앱 | 없음 | 배정하지 않음 |
 
-**"비어 있으면 무시"가 곧 fail-closed다.**
+당시에는 **"비어 있으면 무시"가 곧 fail-closed**라는 결론이었다. 현재 구현의 fail-closed
+기준은 live Desktop 세션과 딥링크 mapping의 검증 성공 여부다.
 
 ### `PostToolUseFailure` 실측
 
