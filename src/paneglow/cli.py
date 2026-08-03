@@ -42,10 +42,10 @@ _HOOK_EVENTS = (
     "PreToolUse",
     "PostToolUse",
     "PostToolUseFailure",
+    "PermissionDenied",
     "Notification",
     "Stop",
     "StopFailure",
-    "PermissionDenied",
     "PreCompact",
     "SessionEnd",
 )
@@ -78,6 +78,7 @@ _PAD_ERRORS = frozenset(
 _TRANSPORTS = frozenset({"USB", "BLE"})
 _EFFECTS = frozenset({"off", "solid", "spin", "rainbow", "blink", "pulse"})
 _SAFE_TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
+_CONFIG_LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_.]{0,127}\Z")
 
 
 class RuntimeDataError(ValueError):
@@ -96,11 +97,13 @@ class RuntimePaths:
     state_dir: Path
     config_path: Path
     runtime_dir: Path
+    transition_lock_path: Path
     lock_path: Path
     pid_path: Path
     snapshot_path: Path
     log_path: Path
     claude_settings_path: Path
+    claude_sessions_dir: Path
     mapping_dir: Path
 
     @classmethod
@@ -115,6 +118,12 @@ class RuntimePaths:
             source.get(
                 "PANEGLOW_CLAUDE_SETTINGS",
                 str(user_home / ".claude" / "settings.json"),
+            )
+        )
+        claude_sessions = _absolute_path(
+            source.get(
+                "PANEGLOW_CLAUDE_SESSIONS",
+                str(user_home / ".claude" / "sessions"),
             )
         )
         mapping = _absolute_path(
@@ -134,11 +143,13 @@ class RuntimePaths:
             state_dir=home / "state",
             config_path=home / "config.json",
             runtime_dir=runtime,
+            transition_lock_path=runtime / "identity-transition.lock",
             lock_path=runtime / "daemon.lock",
             pid_path=runtime / "daemon.pid.json",
             snapshot_path=runtime / "snapshot.json",
             log_path=home / "logs" / "daemon.log",
             claude_settings_path=claude_settings,
+            claude_sessions_dir=claude_sessions,
             mapping_dir=mapping,
         )
 
@@ -147,6 +158,7 @@ class RuntimePaths:
 class InstanceIdentity:
     pid: int
     instance_id: str
+    started_at: float
 
 
 class DaemonRuntime(Protocol):
@@ -162,7 +174,9 @@ class DaemonRuntime(Protocol):
 
 
 def _absolute_path(value: str | os.PathLike[str]) -> Path:
-    return Path(value).expanduser().resolve()
+    # Make paths absolute without following symlinks.  The original path shape
+    # is evidence used by settings/session/mapping trust boundaries below.
+    return Path(value).expanduser().absolute()
 
 
 def _safe_text(value: object, limit: int = 240) -> str:
@@ -174,6 +188,17 @@ def _safe_text(value: object, limit: int = 240) -> str:
         for character in text
     )
     return rendered[:limit]
+
+
+def _config_warning_category(value: object) -> str:
+    """Reduce a config warning to a label without echoing the rejected value."""
+    warning = str(value)
+    if warning.startswith("config unreadable"):
+        return "config_unreadable"
+    if warning.startswith("config must be an object"):
+        return "config_shape"
+    label = warning.partition(":")[0]
+    return label if _CONFIG_LABEL.fullmatch(label) is not None else "invalid_value"
 
 
 def _private_directory(path: Path) -> None:
@@ -471,15 +496,28 @@ def _read_snapshot(path: Path, *, status_poll_ms: int, now: float | None = None,
 
 def _write_pid(path: Path, identity: InstanceIdentity) -> None:
     _atomic_write_json(
-        path, {"pid": identity.pid, "instance_id": identity.instance_id}
+        path,
+        {
+            "schema_version": _SCHEMA_VERSION,
+            "pid": identity.pid,
+            "instance_id": identity.instance_id,
+            "started_at": identity.started_at,
+        },
     )
 
 
 def _read_pid(path: Path) -> InstanceIdentity:
-    raw = _exact_object(_read_private_json(path), {"pid", "instance_id"}, "pid file")
+    raw = _exact_object(
+        _read_private_json(path),
+        {"schema_version", "pid", "instance_id", "started_at"},
+        "pid file",
+    )
+    if _exact_int(raw["schema_version"], "schema_version") != _SCHEMA_VERSION:
+        raise RuntimeDataError("unsupported PID schema")
     return InstanceIdentity(
         pid=_exact_int(raw["pid"], "pid", 1, _PID_MAX),
         instance_id=_validate_instance_id(raw["instance_id"]),
+        started_at=_finite_number(raw["started_at"], "started_at"),
     )
 
 
@@ -497,18 +535,23 @@ class _LifetimeLock:
         self.path = path
         self.fd = -1
 
-    def acquire(self) -> None:
+    def acquire(self, *, blocking: bool = False) -> None:
         _private_directory(self.path.parent)
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) \
             | getattr(os, "O_NOFOLLOW", 0)
         self.fd = os.open(self.path, flags, 0o600)
         os.fchmod(self.fd, 0o600)
         try:
-            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            operation = fcntl.LOCK_EX
+            if not blocking:
+                operation |= fcntl.LOCK_NB
+            fcntl.flock(self.fd, operation)
         except OSError as error:
             os.close(self.fd)
             self.fd = -1
-            if error.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+            if not blocking and error.errno in {
+                errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK
+            }:
                 raise AlreadyRunning("daemon lock is already held") from error
             raise
 
@@ -714,8 +757,17 @@ def _snapshot_from_daemon(daemon: object, generation: int,
     ambient_reason = "pad_unverified"
     scope = getattr(cfg, "underglow_scope", "off")
     layer_mode = getattr(cfg, "layer_underglow", "keep")
+    feedback_active = type(getattr(daemon, "feedback_active", False)) is bool \
+        and getattr(daemon, "feedback_active", False)
     if status_verified and layer != 1:
         ambient_reason = "layer_off" if layer_mode == "off" else "layer_keep"
+    elif status_verified and feedback_active:
+        candidate_color = getattr(cfg, "underglow_claude", None)
+        candidate_effect = getattr(cfg, "effect_fault", None)
+        if type(candidate_color) is int and 0 <= candidate_color <= 0xFFFFFF:
+            ambient_color = candidate_color
+        ambient_effect = _enum_or_none(candidate_effect, _EFFECTS)
+        ambient_reason = "input_feedback"
     elif status_verified and owner == "none":
         ambient_reason = "owner_none"
     elif status_verified and scope == "off":
@@ -790,10 +842,17 @@ class _DefaultRuntime:
     def __init__(self, cfg: object, paths: RuntimePaths) -> None:
         # This is the only lifecycle/daemon coupling point.  Keeping it lazy
         # makes ``hook`` and ``status`` independent of AppKit and IOKit imports.
-        from paneglow import daemon as daemon_module
+        from paneglow import daemon as daemon_module, deeplink, sessions
 
         self.cfg = cfg
-        self.daemon = daemon_module.Daemon(cfg, state_root=paths.state_dir)
+        self.daemon = daemon_module.Daemon(
+            cfg,
+            state_root=paths.state_dir,
+            scanner=lambda: sessions.scan(root=paths.claude_sessions_dir),
+            opener=lambda session_id: deeplink.open_session(
+                session_id, (paths.mapping_dir,)
+            ),
+        )
         self.generation = 0
         self.last_status_at: float | None = None
 
@@ -865,14 +924,27 @@ def _cmd_run(paths: RuntimePaths, *, stdout: TextIO | None = None,
              stderr: TextIO | None = None) -> int:
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
-    identity = InstanceIdentity(os.getpid(), uuid.uuid4().hex)
+    identity = InstanceIdentity(os.getpid(), uuid.uuid4().hex, time.time())
+    transition = _LifetimeLock(paths.transition_lock_path)
     lifetime = _LifetimeLock(paths.lock_path)
+    try:
+        transition.acquire()
+    except AlreadyRunning:
+        print("paneglow: daemon identity transition is already in progress",
+              file=stderr)
+        return 1
+    except (OSError, RuntimeDataError):
+        print("paneglow: could not acquire the private identity transition lock",
+              file=stderr)
+        return 1
     try:
         lifetime.acquire()
     except AlreadyRunning:
+        transition.close()
         print("paneglow: daemon is already running", file=stderr)
         return 1
     except (OSError, RuntimeDataError):
+        transition.close()
         print("paneglow: could not acquire the private daemon lock", file=stderr)
         return 1
 
@@ -880,65 +952,85 @@ def _cmd_run(paths: RuntimePaths, *, stdout: TextIO | None = None,
     runtime: DaemonRuntime | None = None
     latest = _empty_snapshot(identity, running=True)
     failed = False
-    with _signal_stop_event(stop_event):
-        try:
-            cfg, _warnings = _load_config(paths)
-            runtime = _runtime_factory(cfg, paths)
-            _write_pid(paths.pid_path, identity)
-            _atomic_write_json(paths.snapshot_path, _validate_snapshot(latest))
+    try:
+        with _signal_stop_event(stop_event):
+            try:
+                # The transition lock makes lifetime-lock acquisition and
+                # identity publication one observable step for start/stop.
+                _write_pid(paths.pid_path, identity)
+                _atomic_write_json(paths.snapshot_path, _validate_snapshot(latest))
+                transition.close()
+                cfg, _warnings = _load_config(paths)
+                runtime = _runtime_factory(cfg, paths)
 
-            def publish(payload: Mapping[str, Any]) -> None:
-                nonlocal latest
-                latest = _lifecycle_snapshot(payload, identity, running=True)
-                _atomic_write_json(paths.snapshot_path, latest)
+                def publish(payload: Mapping[str, Any]) -> None:
+                    nonlocal latest
+                    latest = _lifecycle_snapshot(payload, identity, running=True)
+                    _atomic_write_json(paths.snapshot_path, latest)
 
-            runtime.run(stop_event, publish)
-        except BaseException:
-            failed = True
-            stop_event.set()
-            print("paneglow: daemon runtime failed", file=stderr)
-        finally:
-            stop_event.set()
-            close_failed = False
-            if runtime is not None:
-                try:
-                    runtime.close(flush_seconds=1.0)
-                except BaseException:
-                    close_failed = True
-                    failed = True
-                snapshot_method = getattr(runtime, "snapshot", None)
-                if callable(snapshot_method):
+                runtime.run(stop_event, publish)
+            except BaseException:
+                failed = True
+                stop_event.set()
+                print("paneglow: daemon runtime failed", file=stderr)
+            finally:
+                stop_event.set()
+                # Mirror startup's guarded publication.  While stop owns this
+                # lock the daemon cannot tear down and release its PID for
+                # reuse between kill(pid, 0) and SIGTERM.
+                if transition.fd < 0:
                     try:
-                        post_close = snapshot_method()
-                        if not isinstance(post_close, Mapping):
-                            raise RuntimeDataError("runtime snapshot is not an object")
-                        latest = _lifecycle_snapshot(
-                            post_close, identity, running=True
-                        )
-                        if latest["pad"]["error_code"] == "close_failed":
-                            failed = True
+                        transition.acquire(blocking=True)
                     except BaseException:
                         failed = True
-            try:
-                stopped = _lifecycle_snapshot(latest, identity, running=False)
-                stopped["last_causes"] = list(stopped["last_causes"])
-                if "stopped" not in stopped["last_causes"]:
-                    stopped["last_causes"].append("stopped")
-                if close_failed:
-                    stopped["pad"] = dict(stopped["pad"])
-                    stopped["pad"]["error_code"] = "close_failed"
-                _atomic_write_json(paths.snapshot_path, _validate_snapshot(stopped))
-            except BaseException:
-                failed = True
-            try:
-                _remove_pid_if_owned(paths.pid_path, identity)
-            except BaseException:
-                failed = True
-            finally:
+                close_failed = False
+                if runtime is not None:
+                    try:
+                        runtime.close(flush_seconds=1.0)
+                    except BaseException:
+                        close_failed = True
+                        failed = True
+                    snapshot_method = getattr(runtime, "snapshot", None)
+                    if callable(snapshot_method):
+                        try:
+                            post_close = snapshot_method()
+                            if not isinstance(post_close, Mapping):
+                                raise RuntimeDataError(
+                                    "runtime snapshot is not an object")
+                            latest = _lifecycle_snapshot(
+                                post_close, identity, running=True
+                            )
+                            if latest["pad"]["error_code"] == "close_failed":
+                                failed = True
+                        except BaseException:
+                            failed = True
                 try:
-                    lifetime.close()
+                    stopped = _lifecycle_snapshot(latest, identity, running=False)
+                    stopped["last_causes"] = list(stopped["last_causes"])
+                    if "stopped" not in stopped["last_causes"]:
+                        stopped["last_causes"].append("stopped")
+                    if close_failed:
+                        stopped["pad"] = dict(stopped["pad"])
+                        stopped["pad"]["error_code"] = "close_failed"
+                    _atomic_write_json(
+                        paths.snapshot_path, _validate_snapshot(stopped))
                 except BaseException:
                     failed = True
+                try:
+                    _remove_pid_if_owned(paths.pid_path, identity)
+                except BaseException:
+                    failed = True
+    finally:
+        # Keep this order: while the transition lock is held, no stop command
+        # can combine a held lifetime lock with old or partially-written hints.
+        try:
+            lifetime.close()
+        except BaseException:
+            failed = True
+        try:
+            transition.close()
+        except BaseException:
+            failed = True
     return 1 if failed else 0
 
 
@@ -972,40 +1064,66 @@ def _open_log(path: Path) -> int:
 
 def _identity_ready(paths: RuntimePaths, *, child_pid: int,
                     status_poll_ms: int) -> InstanceIdentity | None:
-    if not _lock_is_held(paths.lock_path):
+    transition = _LifetimeLock(paths.transition_lock_path)
+    try:
+        transition.acquire()
+    except AlreadyRunning:
         return None
-    identity = _read_pid(paths.pid_path)
-    snapshot = _read_snapshot(paths.snapshot_path, status_poll_ms=status_poll_ms)
-    if identity.pid != child_pid or not snapshot["running"] \
-            or snapshot["generation"] < 1 \
-            or snapshot["pid"] != identity.pid \
-            or snapshot["instance_id"] != identity.instance_id:
-        return None
-    return identity
+    except (OSError, RuntimeDataError) as error:
+        raise RuntimeDataError("identity transition lock is unsafe") from error
+    try:
+        if not _lock_is_held(paths.lock_path):
+            return None
+        identity = _read_pid(paths.pid_path)
+        snapshot = _read_snapshot(
+            paths.snapshot_path, status_poll_ms=status_poll_ms)
+        if identity.pid != child_pid or not snapshot["running"] \
+                or snapshot["generation"] < 1 \
+                or snapshot["pid"] != identity.pid \
+                or snapshot["instance_id"] != identity.instance_id:
+            return None
+        return identity
+    finally:
+        transition.close()
 
 
 def _cmd_start(paths: RuntimePaths, timeout: float, *,
                stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
+    transition = _LifetimeLock(paths.transition_lock_path)
     try:
-        cfg, _warnings = _load_config(paths)
-        poll_ms = getattr(cfg, "status_poll_ms", 1000)
-        if _lock_is_held(paths.lock_path):
-            identity = _read_pid(paths.pid_path)
-            snapshot = _read_snapshot(
-                paths.snapshot_path, status_poll_ms=poll_ms
-            )
-            if snapshot["running"] and snapshot["generation"] >= 1 \
-                    and snapshot["pid"] == identity.pid \
-                    and snapshot["instance_id"] == identity.instance_id:
-                print(f"paneglow: already running (pid {identity.pid})", file=stdout)
-                return 0
-            print("paneglow: daemon lock is held but identity is invalid", file=stderr)
-            return 1
-    except RuntimeDataError:
-        print("paneglow: existing runtime state is unsafe or malformed", file=stderr)
+        transition.acquire()
+    except AlreadyRunning:
+        print("paneglow: daemon identity transition is in progress", file=stderr)
         return 1
+    except (OSError, RuntimeDataError):
+        print("paneglow: identity transition lock is unsafe", file=stderr)
+        return 1
+    try:
+        try:
+            cfg, _warnings = _load_config(paths)
+            poll_ms = getattr(cfg, "status_poll_ms", 1000)
+            if _lock_is_held(paths.lock_path):
+                identity = _read_pid(paths.pid_path)
+                snapshot = _read_snapshot(
+                    paths.snapshot_path, status_poll_ms=poll_ms
+                )
+                if snapshot["running"] and snapshot["generation"] >= 1 \
+                        and snapshot["pid"] == identity.pid \
+                        and snapshot["instance_id"] == identity.instance_id:
+                    print(f"paneglow: already running (pid {identity.pid})",
+                          file=stdout)
+                    return 0
+                print("paneglow: daemon lock is held but identity is invalid",
+                      file=stderr)
+                return 1
+        except RuntimeDataError:
+            print("paneglow: existing runtime state is unsafe or malformed",
+                  file=stderr)
+            return 1
+    finally:
+        transition.close()
 
     command = (*_absolute_command_prefix(), "run")
     log_fd = -1
@@ -1047,35 +1165,52 @@ def _cmd_stop(paths: RuntimePaths, timeout: float, *,
               stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
+    transition = _LifetimeLock(paths.transition_lock_path)
     try:
-        if not _lock_is_held(paths.lock_path):
-            print("paneglow: not running", file=stdout)
-            return 0
-        cfg, _warnings = _load_config(paths)
-        identity = _read_pid(paths.pid_path)
-        snapshot = _read_snapshot(
-            paths.snapshot_path,
-            status_poll_ms=getattr(cfg, "status_poll_ms", 1000),
-            allow_stale=True,
-        )
-        if not snapshot["running"] or snapshot["pid"] != identity.pid \
-                or snapshot["instance_id"] != identity.instance_id:
-            raise RuntimeDataError("daemon identity mismatch")
-        os.kill(identity.pid, 0)
-    except ProcessLookupError:
-        print("paneglow: daemon identity names a missing process", file=stderr)
+        transition.acquire()
+    except AlreadyRunning:
+        print("paneglow: identity transition in progress; no signal was sent",
+              file=stderr)
         return 1
-    except (PermissionError, RuntimeDataError, OSError):
-        print("paneglow: refusing to signal an unverified daemon", file=stderr)
+    except (OSError, RuntimeDataError):
+        print("paneglow: identity transition lock is unsafe; no signal was sent",
+              file=stderr)
         return 1
+    try:
+        try:
+            if not _lock_is_held(paths.lock_path):
+                print("paneglow: not running", file=stdout)
+                return 0
+            cfg, _warnings = _load_config(paths)
+            identity = _read_pid(paths.pid_path)
+            snapshot = _read_snapshot(
+                paths.snapshot_path,
+                status_poll_ms=getattr(cfg, "status_poll_ms", 1000),
+                allow_stale=True,
+            )
+            if not snapshot["running"] or snapshot["pid"] != identity.pid \
+                    or snapshot["instance_id"] != identity.instance_id:
+                raise RuntimeDataError("daemon identity mismatch")
+            os.kill(identity.pid, 0)
+        except ProcessLookupError:
+            print("paneglow: daemon identity names a missing process", file=stderr)
+            return 1
+        except (PermissionError, RuntimeDataError, OSError):
+            print("paneglow: refusing to signal an unverified daemon", file=stderr)
+            return 1
 
-    try:
-        os.kill(identity.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    except OSError:
-        print("paneglow: could not send SIGTERM", file=stderr)
-        return 1
+        try:
+            os.kill(identity.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            print("paneglow: could not send SIGTERM", file=stderr)
+            return 1
+    finally:
+        try:
+            transition.close()
+        except BaseException:
+            pass
 
     deadline = time.monotonic() + timeout
     while True:
@@ -1094,18 +1229,28 @@ def _cmd_stop(paths: RuntimePaths, timeout: float, *,
 
 def _runtime_identity(paths: RuntimePaths, *, status_poll_ms: int,
                       allow_stale: bool = False) -> tuple[InstanceIdentity, dict[str, Any]]:
-    if not _lock_is_held(paths.lock_path):
-        raise RuntimeDataError("daemon is not running")
-    identity = _read_pid(paths.pid_path)
-    snapshot = _read_snapshot(
-        paths.snapshot_path,
-        status_poll_ms=status_poll_ms,
-        allow_stale=allow_stale,
-    )
-    if not snapshot["running"] or snapshot["pid"] != identity.pid \
-            or snapshot["instance_id"] != identity.instance_id:
-        raise RuntimeDataError("runtime identity mismatch")
-    return identity, snapshot
+    transition = _LifetimeLock(paths.transition_lock_path)
+    try:
+        transition.acquire()
+    except AlreadyRunning as error:
+        raise RuntimeDataError("daemon identity is transitioning") from error
+    except (OSError, RuntimeDataError) as error:
+        raise RuntimeDataError("identity transition lock is unsafe") from error
+    try:
+        if not _lock_is_held(paths.lock_path):
+            raise RuntimeDataError("daemon is not running")
+        identity = _read_pid(paths.pid_path)
+        snapshot = _read_snapshot(
+            paths.snapshot_path,
+            status_poll_ms=status_poll_ms,
+            allow_stale=allow_stale,
+        )
+        if not snapshot["running"] or snapshot["pid"] != identity.pid \
+                or snapshot["instance_id"] != identity.instance_id:
+            raise RuntimeDataError("runtime identity mismatch")
+        return identity, snapshot
+    finally:
+        transition.close()
 
 
 def _cmd_status(paths: RuntimePaths, *, stdout: TextIO | None = None,
@@ -1268,13 +1413,64 @@ def _cmd_install_hooks(paths: RuntimePaths, *, stdout: TextIO | None = None,
 def _doctor_hooks(paths: RuntimePaths, command: str, stdout: TextIO) -> bool:
     try:
         settings, _raw = _read_settings(paths.claude_settings_path)
-    except RuntimeDataError:
+    except (OSError, RuntimeDataError):
         print("[FAIL] Claude settings are unreadable", file=stdout)
         return False
     if _hooks_installed(settings, command):
         print("[PASS] all 11 Claude hooks are installed", file=stdout)
         return True
     print("[FAIL] one or more Claude hooks are missing", file=stdout)
+    return False
+
+
+def _doctor_desktop_sessions(paths: RuntimePaths, stdout: TextIO) -> bool:
+    """Check live Claude sessions and their unambiguous Desktop mappings."""
+    from paneglow import deeplink, sessions
+
+    if paths.claude_sessions_dir.is_symlink():
+        print("[FAIL] Claude session directory is unsafe", file=stdout)
+        return False
+    try:
+        snapshot = sessions.scan(root=paths.claude_sessions_dir)
+    except Exception:
+        print("[FAIL] live Claude session scan is unavailable", file=stdout)
+        return False
+    if not snapshot.authoritative:
+        print("[FAIL] live Claude session scan is not authoritative", file=stdout)
+        return False
+    print(
+        f"[PASS] live Claude session scan is authoritative ({len(snapshot.sessions)})",
+        file=stdout,
+    )
+    if paths.mapping_dir.is_symlink() or not paths.mapping_dir.is_dir():
+        print("[FAIL] Claude Desktop mapping directory is missing or unsafe",
+              file=stdout)
+        return False
+    if not snapshot.sessions:
+        print(
+            "[WARN] no live Claude session; deep-link mapping was not exercised",
+            file=stdout,
+        )
+        return True
+
+    try:
+        mapped = sum(
+            deeplink.local_id_for(session.session_id, (paths.mapping_dir,)) is not None
+            for session in snapshot.sessions
+        )
+    except Exception:
+        print("[FAIL] Claude Desktop deep-link mapping check is unavailable",
+              file=stdout)
+        return False
+    if mapped == len(snapshot.sessions):
+        print(f"[PASS] Claude Desktop deep-link mappings resolve ({mapped})",
+              file=stdout)
+        return True
+    print(
+        f"[FAIL] Claude Desktop deep-link mappings unresolved "
+        f"({len(snapshot.sessions) - mapped})",
+        file=stdout,
+    )
     return False
 
 
@@ -1326,7 +1522,13 @@ def _doctor_stopped(stdout: TextIO) -> bool:
     finally:
         if device is not None:
             try:
-                device.close(flush_seconds=1.0)
+                # Doctor is observational.  Flushing/disposing the channel is
+                # required, but clearing either LED zone would mutate the pad.
+                device.close(
+                    flush_seconds=1.0,
+                    turn_off_keys=False,
+                    turn_off_ambient=False,
+                )
             except BaseException:
                 print("[FAIL] pad close/flush failed", file=stdout)
                 healthy = False
@@ -1339,16 +1541,18 @@ def _cmd_doctor(paths: RuntimePaths, *, stdout: TextIO | None = None,
     stderr = sys.stderr if stderr is None else stderr
     cfg, warnings = _load_config(paths)
     ok = True
-    for warning in warnings:
-        print(f"[WARN] config: {_safe_text(warning)}", file=stdout)
+    for category in dict.fromkeys(
+            _config_warning_category(warning) for warning in warnings):
+        print(f"[WARN] config: {category}", file=stdout)
 
-    command = _hook_command()
-    ok = _doctor_hooks(paths, command, stdout) and ok
-    if paths.mapping_dir.is_dir():
-        print("[PASS] Claude session mapping directory exists", file=stdout)
-    else:
-        print("[FAIL] Claude session mapping directory is missing", file=stdout)
+    try:
+        command = _hook_command()
+    except (OSError, RuntimeError):
+        print("[FAIL] Claude hook command is unavailable", file=stdout)
         ok = False
+    else:
+        ok = _doctor_hooks(paths, command, stdout) and ok
+    ok = _doctor_desktop_sessions(paths, stdout) and ok
 
     try:
         held = _lock_is_held(paths.lock_path)
