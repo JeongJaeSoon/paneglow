@@ -67,6 +67,20 @@ Claude Code 훅을 기존 설정에 병합하고 데몬을 시작한다.
 
 데몬 로그는 `~/.paneglow/logs/daemon.log`에 기록된다.
 
+Paneglow가 받은 Agent-key 메시지의 중복·순서와 각 dispatch 시점의 owner 표본을 확인할 때만
+일회성 trace를 실행한다. 데몬이 실행 중이어야 하며, 기본값은 5초·최대 32개 이벤트다.
+
+```bash
+.venv/bin/paneglow trace-input --seconds 5
+```
+
+trace는 평소에는 비활성화되어 있고 영구 입력 로그를 남기지 않는다. 공개 결과는 schema와
+실제 수집 시간·잘림 여부, 그리고 각 이벤트의 순번, 상대 시각, `A1`~`A6` 또는 `other`로
+정규화한 키, `0`·`1` 또는 `other`인 action, owner, Layer 1·slot 상태, 처리 결과, trace-local
+연결 순번으로 제한한다. raw HID payload, 장치 식별자, 경로, 세션 ID, bundle ID와 wall-clock
+시각은 내보내지 않는다. 한 번에 최대 10초·64개 이벤트까지만 허용한다. 이 결과만으로 물리
+bounce의 원인이나 정확한 앱 focus 전환 시각을 판별할 수는 없다.
+
 ## 선택 설정
 
 설정 파일은 `~/.paneglow/config.json`이다. 파일이 없으면 측정된 기본값을 사용하며, 잘못된
@@ -115,7 +129,8 @@ Claude Desktop 경로의 구현은 완료되어 있다.
 
 실기와 앱 번들로 확인한 근거는 [하드웨어 노트](docs/hardware-notes.md),
 [딥링크 실측](docs/verification/deeplink.md), [훅 이벤트 검증](docs/verification/hook-events.md)에
-남겨 두었다.
+남겨 두었다. `4f3dcbe` 당시 설치본의 USB 핵심 E2E와 남은 반복 범위는
+[first-light 기록](docs/verification/first-light.md)에 분리했다.
 
 | 확인 항목 | 결과 |
 |---|---|
@@ -130,8 +145,10 @@ Claude Desktop 경로의 구현은 완료되어 있다.
 ## 동작 원칙
 
 - **Layer 1에서만 동작한다.** Layer 2 이상에서는 Agent 키 입력과 표시를 포기한다.
-- **Codex 앱과 함께 쓸 수 있다.** Codex가 앞에 있으면 Agent 키를 양보하고 테두리만 소유권을
-  보여준다.
+- **소유권 gate는 Paneglow의 dispatch만 제어한다.** Codex가 앞에 있으면 세션 열기를 거부하고
+  테두리만 소유권을 보여주지만, Codex가 같은 raw Agent-key report를 받는 것까지 차단하지는
+  않는다. 따라서 Claude에서 A키를 빠르게 누를 때 Codex 창이 잠깐 전면으로 오는 공존 문제가
+  현재 남아 있다.
 - **C1~C7은 사용자 영역이다.** 백라이트와 키맵을 변경하지 않는다.
 - **승인·거절 기능은 없다.** 세션에 응답하려면 Accessibility가 필요해 권한 없는 동작 원칙과
   충돌한다.
