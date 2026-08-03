@@ -1,6 +1,6 @@
-# paneglow
+# Paneglow
 
-> Codex Micro 매크로패드로 병렬 Claude Code Desktop 세션을 보고 연다.
+> Codex Micro로 병렬 Claude Code Desktop 세션의 상태를 보고 바로 연다.
 
 6개 Agent 키가 최근 세션의 상태를 색으로 보여주고, 누르면 그 세션을 Claude Desktop에서
 연다. 테두리는 지금 Agent 키를 Claude와 Codex 중 누가 소유하는지 보여주며, 화면 밖 세션이

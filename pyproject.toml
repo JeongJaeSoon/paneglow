@@ -1,7 +1,7 @@
 [project]
 name = "paneglow"
 version = "0.0.0"
-description = "Codex Micro dashboard for parallel Claude Code Desktop sessions"
+description = "macOS Codex Micro dashboard and launcher for parallel Claude Code Desktop sessions"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -12,6 +12,10 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 paneglow = "paneglow.cli:main"
+
+[project.urls]
+Repository = "https://github.com/JeongJaeSoon/paneglow"
+Issues = "https://github.com/JeongJaeSoon/paneglow/issues"
 
 [build-system]
 requires = ["setuptools>=68"]
