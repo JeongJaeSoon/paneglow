@@ -22,6 +22,28 @@ Claude 화면에서 A키를 빠르게 누를 때 Codex 창이 잠깐 전면으�
 Layer 2, 명시적 unplug/replug 반복은 이번 installed-product 실행에서 완료했다고 기록하지
 않는다.
 
+## 최신 main 재확인
+
+2026-08-04 JST에 후속 변경을 모두 병합한 `main`
+`20b6a04c6bb2849e58cb99f17f27d630d79af8db`에서도 사용자 개입 없이 확인 가능한 범위를 다시
+실행했다.
+
+- editable install을 갱신한 뒤 package summary와 CLI help가 새 프로젝트 설명을 표시했다.
+- 회귀 테스트는 `482 passed, 1 skipped`, 별도로 실제 장치를 여는 integration marker는
+  `1 passed, 482 deselected`였다.
+- `install-hooks`는 `hooks already installed`를 반환했고 Claude 설정과 백업은 계속 `0600`이다.
+- daemon이 멈춘 상태의 `doctor`는 11개 훅, authoritative live scan, fresh USB
+  `device.status`와 Layer 1을 통과했다.
+- daemon을 시작한 뒤 `status`와 running `doctor`가 USB, firmware v0.4.1, Layer 1을 읽었다.
+  실행 중 `start`를 다시 호출해도 기존 instance 하나만 유지했다.
+- `trace-input --seconds 0.5 --max-events 32`의 무입력 왕복은
+  `{"duration_ms":500,"events":[],"schema_version":1,"truncated":false}`를 반환했다. 완료 뒤
+  request, active, result artifact는 남지 않았고 runtime 파일은 `0600`이다.
+
+이 재확인 시점에는 live Claude Code Desktop 세션이 0개였다. 따라서 최신 `main`에서 Desktop
+mapping·딥링크와 물리 A1→A2 입력을 다시 실행했다는 뜻은 아니다. 아래의 `4f3dcbe` 실기 근거와
+최신 main 재확인 범위를 합쳐 과장해서는 안 된다.
+
 ## 측정 환경
 
 | 항목 | 값 |
