@@ -68,6 +68,50 @@ def test_classify_ignores_other_notifications(notification_type: object):
     assert hook.classify(payload) is None
 
 
+def _stored(tmp_path: Path, state: AgentState) -> Path:
+    root = tmp_path / "state"
+    record = SessionRecord(session_id="session-1", cwd="/workspace",
+                           state=state, rev=1, updated_at=2.0)
+    store.write(record, root)
+    return root
+
+
+def _run_idle_prompt(root: Path) -> None:
+    payload = event("Notification", notification_type="idle_prompt")
+    assert hook.run(io.StringIO(json.dumps(payload)), root) == 0
+
+
+def test_idle_prompt_promotes_a_working_session_to_waiting(tmp_path: Path):
+    root = _stored(tmp_path, AgentState.WORKING)
+    _run_idle_prompt(root)
+    assert store.read_all(root)[0].state is AgentState.WAITING
+
+
+@pytest.mark.parametrize(
+    "state", [AgentState.IDLE, AgentState.WAITING, AgentState.DONE, AgentState.ERROR]
+)
+def test_idle_prompt_leaves_non_working_states_alone(
+    tmp_path: Path, state: AgentState
+):
+    root = _stored(tmp_path, state)
+    _run_idle_prompt(root)
+    assert store.read_all(root)[0].state is state
+
+
+def test_idle_prompt_without_a_record_writes_nothing(tmp_path: Path):
+    root = tmp_path / "state"
+    _run_idle_prompt(root)
+    assert store.read_all(root) == []
+
+
+def test_idle_prompt_from_a_subagent_is_dropped(tmp_path: Path):
+    root = _stored(tmp_path, AgentState.WORKING)
+    payload = event("Notification", notification_type="idle_prompt",
+                    agent_type="claude")
+    assert hook.run(io.StringIO(json.dumps(payload)), root) == 0
+    assert store.read_all(root)[0].state is AgentState.WORKING
+
+
 @pytest.mark.parametrize("payload", [None, [], "event", 3, False])
 def test_classify_non_dict_inputs_as_no_state(payload: object):
     assert hook.classify(payload) is None

@@ -86,6 +86,39 @@ def record_from(event: object, rev: int, now: float) -> SessionRecord | None:
     )
 
 
+def _idle_promotion(event: object, state_dir: Path, rev: int,
+                    now: float) -> SessionRecord | None:
+    """Turn an idle_prompt into waiting, but only for a working session.
+
+    Elicitations inside tool calls (credential prompts, browser pickers) emit
+    no hook of their own, so a blocked session sits at working until Claude's
+    60s idle notification arrives. A completed turn already moved to done via
+    Stop, which keeps finished sessions from lighting up as waiting.
+    """
+    if not isinstance(event, dict) or "agent_type" in event:
+        return None
+    if event.get("hook_event_name") != "Notification":
+        return None
+    if event.get("notification_type") != "idle_prompt":
+        return None
+    session_id = event.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return None
+
+    for current in store.read_all(state_dir):
+        if current.session_id == session_id:
+            if current.state is not AgentState.WORKING:
+                return None
+            return SessionRecord(
+                session_id=session_id,
+                cwd=current.cwd,
+                state=AgentState.WAITING,
+                rev=rev,
+                updated_at=now,
+            )
+    return None
+
+
 def run(stdin: TextIO, state_dir: Path) -> int:
     """Consume one stdin JSON event and persist it, always returning success.
 
@@ -95,6 +128,10 @@ def run(stdin: TextIO, state_dir: Path) -> int:
     try:
         event = json.load(stdin)
         record = record_from(event, rev=time.time_ns(), now=time.time())
+        if record is None:
+            record = _idle_promotion(
+                event, state_dir, rev=time.time_ns(), now=time.time()
+            )
         if record is not None:
             store.write(record, state_dir)
     except Exception:
