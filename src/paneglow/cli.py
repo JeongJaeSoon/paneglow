@@ -54,6 +54,13 @@ _STATES = frozenset({"idle", "working", "done", "error", "waiting"})
 _SLOT_REASONS = frozenset(
     {"empty", "no_hook", "state", "working_timeout", "done_faded"}
 )
+_REASON_LABELS = {
+    "empty": "empty slot",
+    "no_hook": "dim: no hook state",
+    "state": "state",
+    "working_timeout": "dim: working timed out",
+    "done_faded": "dim: done faded",
+}
 _INPUT_RESULTS = frozenset(
     {
         "opened",
@@ -2498,17 +2505,10 @@ def _cmd_status(paths: RuntimePaths, *, stdout: TextIO | None = None,
     for diagnostic in scan["diagnostics"]:
         print(f"            diagnostic: {diagnostic}", file=stdout)
 
-    reason_labels = {
-        "empty": "empty slot",
-        "no_hook": "dim: no hook state",
-        "state": "state",
-        "working_timeout": "dim: working timed out",
-        "done_faded": "dim: done faded",
-    }
     for index, slot in enumerate(snapshot["slots"], start=1):
         session_id = slot["session_id"] or "-"
         state = slot["effective_state"] or "dim"
-        reason = reason_labels[slot["reason"]]
+        reason = _REASON_LABELS[slot["reason"]]
         print(f"A{index}          {state:<8} {session_id} ({reason})", file=stdout)
     ambient = snapshot["zones"]["ambient"]
     colour = "off" if ambient["color"] is None else f"#{ambient['color']:06X}"
@@ -2517,6 +2517,14 @@ def _cmd_status(paths: RuntimePaths, *, stdout: TextIO | None = None,
     if snapshot["last_input_result"] is not None:
         print(f"last input  {snapshot['last_input_result']}", file=stdout)
     return 0
+
+
+def _cmd_ui(paths: RuntimePaths, port: int, *, open_browser: bool,
+            stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
+    from paneglow import ui
+
+    return ui.serve(paths, port=port, open_browser=open_browser,
+                    stdout=stdout, stderr=stderr)
 
 
 def _valid_trace_bounds(seconds: object, max_events: object) -> bool:
@@ -3043,6 +3051,13 @@ def _build_parser():
     )
     stop.add_argument("--timeout", type=float, default=5.0)
     commands.add_parser("status", help="read the daemon runtime snapshot")
+    ui = commands.add_parser(
+        "ui", help="serve a read-only local dashboard for the runtime snapshot"
+    )
+    ui.add_argument("--port", type=int, default=0,
+                    help="loopback port (default: pick a free one)")
+    ui.add_argument("--no-open", action="store_true",
+                    help="do not open the browser")
     trace = commands.add_parser(
         "trace-input", help="capture a bounded, privacy-safe input trace"
     )
@@ -3099,6 +3114,9 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if parsed.command == "ui" and not 0 <= parsed.port <= 65535:
+        print("paneglow: --port must be between 0 and 65535", file=sys.stderr)
+        return 2
     if parsed.command == "autostart" \
             and parsed.autostart_command in {"install", "uninstall"} \
             and (not math.isfinite(parsed.timeout) or parsed.timeout < 0):
@@ -3115,6 +3133,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_stop(paths, parsed.timeout)
     if parsed.command == "status":
         return _cmd_status(paths)
+    if parsed.command == "ui":
+        return _cmd_ui(paths, parsed.port, open_browser=not parsed.no_open)
     if parsed.command == "trace-input":
         return _cmd_trace_input(paths, parsed.seconds, parsed.max_events)
     if parsed.command == "doctor":
