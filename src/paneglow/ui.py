@@ -19,8 +19,10 @@ from typing import TextIO
 from paneglow import cli
 from paneglow.render import PALETTE
 
+_PALETTE_HEX = {state.value: f"#{colour:06X}" for state, colour in PALETTE.items()}
 
-def build_data(paths: "cli.RuntimePaths") -> dict:
+
+def build_data(paths: cli.RuntimePaths) -> dict:
     """Assemble the ``/data`` payload.  Data problems never raise -- they
     degrade, so the polling client always has something to render."""
     cfg, warnings = cli._load_config(paths)
@@ -28,7 +30,7 @@ def build_data(paths: "cli.RuntimePaths") -> dict:
         "status": "degraded",
         "detail": "",
         "snapshot": None,
-        "palette": {state.value: f"#{colour:06X}" for state, colour in PALETTE.items()},
+        "palette": _PALETTE_HEX,
         "reason_labels": cli._REASON_LABELS,
         "config_warnings": warnings,
     }
@@ -54,7 +56,7 @@ def build_data(paths: "cli.RuntimePaths") -> dict:
 
 
 class _UIServer(ThreadingHTTPServer):
-    def __init__(self, paths: "cli.RuntimePaths", port: int):
+    def __init__(self, paths: cli.RuntimePaths, port: int):
         self.paths = paths
         self.token = secrets.token_urlsafe(16)
         super().__init__(("127.0.0.1", port), _Handler)
@@ -89,11 +91,11 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
 
-def make_server(paths: "cli.RuntimePaths", *, port: int = 0) -> _UIServer:
+def make_server(paths: cli.RuntimePaths, *, port: int = 0) -> _UIServer:
     return _UIServer(paths, port)
 
 
-def serve(paths: "cli.RuntimePaths", *, port: int = 0, open_browser: bool = True,
+def serve(paths: cli.RuntimePaths, *, port: int = 0, open_browser: bool = True,
           stdout: TextIO | None = None, stderr: TextIO | None = None,
           stop_event: threading.Event | None = None) -> int:
     stdout = sys.stdout if stdout is None else stdout

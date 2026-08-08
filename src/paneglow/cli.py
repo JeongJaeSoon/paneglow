@@ -2519,12 +2519,10 @@ def _cmd_status(paths: RuntimePaths, *, stdout: TextIO | None = None,
     return 0
 
 
-def _cmd_ui(paths: RuntimePaths, port: int, *, open_browser: bool,
-            stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
+def _cmd_ui(paths: RuntimePaths, port: int, *, open_browser: bool) -> int:
     from paneglow import ui
 
-    return ui.serve(paths, port=port, open_browser=open_browser,
-                    stdout=stdout, stderr=stderr)
+    return ui.serve(paths, port=port, open_browser=open_browser)
 
 
 def _valid_trace_bounds(seconds: object, max_events: object) -> bool:

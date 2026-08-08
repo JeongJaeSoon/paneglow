@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from paneglow import cli, pad, ui
-from test_cli import identity, paths_for, snapshot_for
+from tests.test_cli import identity, paths_for, snapshot_for
 
 
 @pytest.fixture(autouse=True)
@@ -115,7 +115,10 @@ def test_ui_serves_html_and_json_over_http(tmp_path: Path):
         thread.join(timeout=5)
 
 
-def test_ui_serve_prints_url_and_respects_no_open(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("open_browser", [False, True])
+def test_ui_serve_prints_url_and_honours_open_browser(
+    tmp_path: Path, monkeypatch, open_browser: bool
+):
     paths = paths_for(tmp_path)
     opened: list[str] = []
     monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
@@ -123,27 +126,15 @@ def test_ui_serve_prints_url_and_respects_no_open(tmp_path: Path, monkeypatch):
     stop.set()
     stdout = io.StringIO()
 
-    assert ui.serve(paths, port=0, open_browser=False, stdout=stdout,
+    assert ui.serve(paths, port=0, open_browser=open_browser, stdout=stdout,
                     stop_event=stop) == 0
 
-    output = stdout.getvalue()
-    assert "http://127.0.0.1:" in output
-    assert opened == []
-
-
-def test_ui_serve_opens_browser_by_default(tmp_path: Path, monkeypatch):
-    paths = paths_for(tmp_path)
-    opened: list[str] = []
-    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
-    stop = threading.Event()
-    stop.set()
-    stdout = io.StringIO()
-
-    assert ui.serve(paths, port=0, open_browser=True, stdout=stdout,
-                    stop_event=stop) == 0
-
-    assert len(opened) == 1
-    assert opened[0].startswith("http://127.0.0.1:")
+    assert "http://127.0.0.1:" in stdout.getvalue()
+    if open_browser:
+        assert len(opened) == 1
+        assert opened[0].startswith("http://127.0.0.1:")
+    else:
+        assert opened == []
 
 
 def test_ui_cli_dispatch(monkeypatch):
