@@ -250,6 +250,27 @@ def test_effective_working_and_done_do_not_mutate_source_records():
     assert work.state is AgentState.WORKING and done.state is AgentState.DONE
 
 
+def test_done_faded_sessions_release_slots_instead_of_leaving_dark_holes():
+    # Field case from issue #48: seven sessions, three of them done-faded, so
+    # three of the six slots were held by keys the render had already darkened.
+    ids = [f"s{index}" for index in range(7)]
+    faded = {"s0", "s2", "s4"}
+    snapshot = sessions.SessionSnapshot(
+        tuple(live(session_id, float(index))
+              for index, session_id in enumerate(ids)), True, ())
+    records = tuple(
+        record(session_id, AgentState.DONE, 0.0) if session_id in faded
+        else record(session_id, AgentState.IDLE, 100.0)
+        for session_id in ids)
+    d = build(cfg=Config(done_fade_seconds=5), snapshot=snapshot, records=records)
+    d.tick(100.0)
+
+    assert d.slots == ["s1", "s3", "s5", "s6", None, None]
+    # Every occupied slot lights up: no hole between lit agent keys.
+    assert all(d.effective_states[session_id] is not None
+               for session_id in d.slots if session_id is not None)
+
+
 def test_effective_reason_distinguishes_no_hook_from_a_real_state():
     snapshot = sessions.SessionSnapshot(
         (live("unknown", 1), live("waiting", 2)), True, ())

@@ -255,7 +255,14 @@ class Daemon:
             else:
                 reasons[session.session_id] = "state"
 
-        activity = slots.activity_times(snapshot.sessions, updated_at)
+        # A slot is only worth holding while the key is lit. Sessions the render
+        # has already faded out give their slot back, so no hole opens between
+        # lit keys and a live session is never pushed out by a finished one.
+        activity = slots.activity_times(
+            (session for session in snapshot.sessions
+             if reasons.get(session.session_id) != "done_faded"),
+            updated_at,
+        )
         priority_states = {session_id: state for session_id, state in effective.items()
                            if state is not None}
         new_slots = slots.assign(
