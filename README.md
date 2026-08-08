@@ -114,11 +114,7 @@ bounce의 원인이나 정확한 앱 focus 전환 시각을 판별할 수는 없
     "scope": "outside",
     "reclaim_delay_ms": 200
   },
-  "state": {
-    "ttl_minutes": 30,
-    "done_fade_seconds": 180,
-    "working_max_seconds": 900
-  },
+  "state": {"ttl_minutes": 30, "working_max_seconds": 900},
   "timing": {"poll_ms": 250, "status_poll_ms": 1000}
 }
 ```

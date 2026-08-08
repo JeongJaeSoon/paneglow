@@ -40,7 +40,7 @@ def test_alert_level_only_fires_for_waiting_or_error():
 def test_working_stays_working_before_its_limit_and_across_clock_skew(now):
     assert effective_state(
         AgentState.WORKING, updated_at=100.0, now=now,
-        working_max_seconds=10, done_fade_seconds=180,
+        working_max_seconds=10,
     ) is AgentState.WORKING
 
 
@@ -48,38 +48,28 @@ def test_working_stays_working_before_its_limit_and_across_clock_skew(now):
 def test_working_becomes_idle_at_its_limit(limit):
     assert effective_state(
         AgentState.WORKING, updated_at=100.0, now=100.0 + limit,
-        working_max_seconds=limit, done_fade_seconds=180,
+        working_max_seconds=limit,
     ) is AgentState.IDLE
 
 
-def test_done_stays_visible_before_fade_then_turns_off_at_the_boundary():
+def test_done_never_expires_because_only_a_dead_process_turns_a_key_off():
+    """One live session is one lit key: no timer may darken a live session."""
     assert effective_state(
-        AgentState.DONE, updated_at=100.0, now=109.999,
-        working_max_seconds=900, done_fade_seconds=10,
+        AgentState.DONE, updated_at=0.0, now=1e9,
+        working_max_seconds=900,
     ) is AgentState.DONE
-    assert effective_state(
-        AgentState.DONE, updated_at=100.0, now=110.0,
-        working_max_seconds=900, done_fade_seconds=10,
-    ) is None
-
-
-def test_zero_done_fade_turns_done_off_immediately():
-    assert effective_state(
-        AgentState.DONE, updated_at=100.0, now=100.0,
-        working_max_seconds=900, done_fade_seconds=0,
-    ) is None
 
 
 @pytest.mark.parametrize("state", [AgentState.IDLE, AgentState.WAITING, AgentState.ERROR])
 def test_non_transient_states_do_not_expire(state):
     assert effective_state(
         state, updated_at=0.0, now=1e9,
-        working_max_seconds=0, done_fade_seconds=0,
+        working_max_seconds=0,
     ) is state
 
 
 def test_unknown_state_stays_unknown():
     assert effective_state(
         None, updated_at=0.0, now=1e9,
-        working_max_seconds=0, done_fade_seconds=0,
+        working_max_seconds=0,
     ) is None

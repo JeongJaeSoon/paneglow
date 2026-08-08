@@ -27,9 +27,7 @@ PadErrorCode = Literal[
     "unavailable", "status_unverified", "disconnected", "poll_failed",
     "send_failed", "reconnect_failed", "close_failed",
 ]
-SlotReason = Literal[
-    "empty", "no_hook", "state", "working_timeout", "done_faded",
-]
+SlotReason = Literal["empty", "no_hook", "state", "working_timeout"]
 _OWNERS = {"none", "claude", "codex"}
 _UNSET = object()
 _STATUS_TIMEOUT_SECONDS = 1.0
@@ -245,24 +243,14 @@ class Daemon:
                 updated_at=record.updated_at,
                 now=now,
                 working_max_seconds=self.cfg.working_max_seconds,
-                done_fade_seconds=self.cfg.done_fade_seconds,
             )
             derived = effective[session.session_id]
-            if record.state is AgentState.WORKING and derived is AgentState.IDLE:
-                reasons[session.session_id] = "working_timeout"
-            elif record.state is AgentState.DONE and derived is None:
-                reasons[session.session_id] = "done_faded"
-            else:
-                reasons[session.session_id] = "state"
+            reasons[session.session_id] = (
+                "working_timeout"
+                if record.state is AgentState.WORKING and derived is AgentState.IDLE
+                else "state")
 
-        # A slot is only worth holding while the key is lit. Sessions the render
-        # has already faded out give their slot back, so no hole opens between
-        # lit keys and a live session is never pushed out by a finished one.
-        activity = slots.activity_times(
-            (session for session in snapshot.sessions
-             if reasons.get(session.session_id) != "done_faded"),
-            updated_at,
-        )
+        activity = slots.activity_times(snapshot.sessions, updated_at)
         priority_states = {session_id: state for session_id, state in effective.items()
                            if state is not None}
         new_slots = slots.assign(

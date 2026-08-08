@@ -51,15 +51,13 @@ _HOOK_EVENTS = (
 )
 _OWNERS = frozenset({"claude", "codex", "none"})
 _STATES = frozenset({"idle", "working", "done", "error", "waiting"})
-_SLOT_REASONS = frozenset(
-    {"empty", "no_hook", "state", "working_timeout", "done_faded"}
-)
+_SLOT_REASONS = frozenset({"empty", "no_hook", "state", "working_timeout"})
 _REASON_LABELS = {
     "empty": "empty slot",
     "no_hook": "dim: no hook state",
     "state": "state",
-    "working_timeout": "dim: working timed out",
-    "done_faded": "dim: done faded",
+    # Timing out only recolours the key to idle white; it never darkens it.
+    "working_timeout": "idle: working timed out",
 }
 _INPUT_RESULTS = frozenset(
     {

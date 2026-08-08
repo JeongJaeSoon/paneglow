@@ -30,18 +30,16 @@ class Session:
 
 
 def effective_state(state: AgentState | None, *, updated_at: float, now: float,
-                    working_max_seconds: float,
-                    done_fade_seconds: float) -> AgentState | None:
+                    working_max_seconds: float) -> AgentState | None:
     """Return the display state without changing the stored source record.
 
-    A missing stop event must not leave a session blue forever, while waiting
-    and error states must remain visible until a real event replaces them.
+    A missing stop event must not leave a session blue forever, so working ages
+    into idle.  Nothing else expires: one live session is one lit key, and only
+    the session process going away -- which drops it from
+    :func:`paneglow.sessions.scan` -- turns a key off.
     """
-    age = max(0.0, now - updated_at)
-    if state is AgentState.WORKING and age >= working_max_seconds:
+    if state is AgentState.WORKING and max(0.0, now - updated_at) >= working_max_seconds:
         return AgentState.IDLE
-    if state is AgentState.DONE and age >= done_fade_seconds:
-        return None
     return state
 
 

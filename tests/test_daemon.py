@@ -240,51 +240,56 @@ def test_effective_working_and_done_do_not_mutate_source_records():
         (live("work", 1), live("done", 2)), True, ())
     work = record("work", AgentState.WORKING, 0)
     done = record("done", AgentState.DONE, 0)
-    cfg = Config(working_max_seconds=5, done_fade_seconds=5)
-    d = build(cfg=cfg, snapshot=snapshot, records=(work, done))
+    d = build(cfg=Config(working_max_seconds=5), snapshot=snapshot,
+              records=(work, done))
     d.tick(5)
-    assert d.effective_states == {"work": AgentState.IDLE, "done": None}
-    assert d.effective_reasons == {
-        "work": "working_timeout", "done": "done_faded",
-    }
+    assert d.effective_states == {"work": AgentState.IDLE, "done": AgentState.DONE}
+    assert d.effective_reasons == {"work": "working_timeout", "done": "state"}
     assert work.state is AgentState.WORKING and done.state is AgentState.DONE
 
 
-def test_done_faded_sessions_release_slots_instead_of_leaving_dark_holes():
-    # Field case from issue #48: seven sessions, three of them done-faded, so
-    # three of the six slots were held by keys the render had already darkened.
+def test_every_live_session_on_the_board_lights_a_key_however_old_it_is():
+    # Field case from issue #48: seven sessions, three of them long finished.
+    # Nothing ages out of sight -- only a dead process empties a slot.
     ids = [f"s{index}" for index in range(7)]
-    faded = {"s0", "s2", "s4"}
+    finished = {"s0", "s2", "s4"}
     snapshot = sessions.SessionSnapshot(
         tuple(live(session_id, float(index))
               for index, session_id in enumerate(ids)), True, ())
     records = tuple(
-        record(session_id, AgentState.DONE, 0.0) if session_id in faded
+        record(session_id, AgentState.DONE, 0.0) if session_id in finished
         else record(session_id, AgentState.IDLE, 100.0)
         for session_id in ids)
-    d = build(cfg=Config(done_fade_seconds=5), snapshot=snapshot, records=records)
-    d.tick(100.0)
+    d = build(snapshot=snapshot, records=records)
+    d.tick(1e6)
 
-    assert d.slots == ["s1", "s3", "s5", "s6", None, None]
-    # Every occupied slot lights up: no hole between lit agent keys.
+    assert None not in d.slots
     assert all(d.effective_states[session_id] is not None
-               for session_id in d.slots if session_id is not None)
+               for session_id in d.slots)
+    # Six keys for seven sessions: the one left off the board is a finished one.
+    assert set(ids) - set(d.slots) <= finished
 
 
-def test_faded_full_board_stops_starving_a_quieter_live_session():
-    # Sticky eviction needs a strictly newer session, so six faded slots used to
-    # lock out a live session that had simply been quiet for longer.
-    faded = [f"f{index}" for index in range(6)]
+def test_a_full_board_evicts_a_finished_session_and_never_a_live_one():
+    # A done session may well be the most recently active; activity alone used
+    # to hand the eviction to a live session that had merely been quiet.
+    # Eviction is the sticky policy's business, so this names it rather than
+    # riding on whichever policy happens to be the default.
+    held = ["d0", "a0", "d1", "a1", "d2", "a2"]
     snapshot = sessions.SessionSnapshot(
-        tuple(live(session_id, 1.0) for session_id in [*faded, "quiet"]), True, ())
-    records = (*(record(session_id, AgentState.DONE, 90.0)
-                 for session_id in faded),
-               record("quiet", AgentState.IDLE, 10.0))
-    d = build(cfg=Config(done_fade_seconds=5), snapshot=snapshot, records=records)
-    d.slots = list(faded)
-    d.tick(100.0)
+        tuple(live(session_id, 1.0) for session_id in [*held, "newcomer"]),
+        True, ())
+    records = (
+        *(record(f"d{index}", AgentState.DONE, 100.0 + index) for index in range(3)),
+        *(record(f"a{index}", AgentState.IDLE, 10.0 + index) for index in range(3)),
+        record("newcomer", AgentState.IDLE, 50.0),
+    )
+    d = build(cfg=Config(slots_order="recent_sticky"), snapshot=snapshot,
+              records=records)
+    d.slots = list(held)
+    d.tick(200.0)
 
-    assert d.slots == ["quiet", None, None, None, None, None]
+    assert d.slots == ["newcomer", "a0", "d1", "a1", "d2", "a2"]
 
 
 def test_effective_reason_distinguishes_no_hook_from_a_real_state():

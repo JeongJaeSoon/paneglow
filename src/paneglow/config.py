@@ -31,7 +31,6 @@ class Config:
     reclaim_delay_ms: int = 200
     layer_underglow: str = "keep"
     ttl_minutes: int = 30
-    done_fade_seconds: int = 180
     working_max_seconds: int = 900
     poll_ms: int = 250
     status_poll_ms: int = 1000
@@ -170,8 +169,6 @@ def load(path: Path | None) -> tuple[Config, list[str]]:
                               "layer_gate.underglow", warnings),
         ttl_minutes=_int(state, "ttl_minutes", 30, "state.ttl_minutes",
                          warnings, minimum=1),
-        done_fade_seconds=_int(state, "done_fade_seconds", 180,
-                               "state.done_fade_seconds", warnings, minimum=0),
         working_max_seconds=_int(state, "working_max_seconds", 900,
                                  "state.working_max_seconds", warnings, minimum=0),
         poll_ms=_int(timing, "poll_ms", 250, "timing.poll_ms",
