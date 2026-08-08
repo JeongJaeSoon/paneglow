@@ -23,7 +23,7 @@ class Config:
     gate_mode: str = "frontmost"
     yield_to: tuple[str, ...] = ("com.openai.codex",)
     own_when: tuple[str, ...] = ("com.anthropic.claudefordesktop",)
-    slots_order: str = "recent_sticky"
+    slots_order: str = "recent"
     colors: dict[AgentState, int] = field(default_factory=lambda: dict(PALETTE))
     underglow_claude: int = 0xFF6D00
     underglow_codex: int = 0x304FFE
@@ -157,7 +157,7 @@ def load(path: Path | None) -> tuple[Config, list[str]]:
                           "gate.yield_to", warnings),
         own_when=_strings(gate.get("own_when"), ("com.anthropic.claudefordesktop",),
                           "gate.own_when", warnings),
-        slots_order=_pick(slots.get("order"), _SLOT_ORDERS, "recent_sticky",
+        slots_order=_pick(slots.get("order"), _SLOT_ORDERS, "recent",
                           "slots.order", warnings),
         colors={state: _colour(colors.get(state.value), default,
                                f"colors.{state.value}", warnings)

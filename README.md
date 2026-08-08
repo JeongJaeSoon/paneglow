@@ -105,7 +105,7 @@ bounce의 원인이나 정확한 앱 focus 전환 시각을 판별할 수는 없
     "own_when": ["com.anthropic.claudefordesktop"],
     "yield_to": ["com.openai.codex"]
   },
-  "slots": {"order": "recent_sticky"},
+  "slots": {"order": "recent"},
   "colors": {
     "idle": "#FFFFFF",
     "working": "#304FFE",
@@ -129,6 +129,10 @@ bounce의 원인이나 정확한 앱 focus 전환 시각을 판별할 수는 없
   "timing": {"poll_ms": 250, "status_poll_ms": 1000}
 }
 ```
+
+`slots.order`의 기본값 `recent`는 Desktop 사이드바의 Sort by Recency와 키 순서를 맞춘다.
+활동이 있을 때마다 재정렬하므로 키를 누르려는 순간 대상 세션이 바뀔 수 있고, 그게 거슬리면
+`"recent_sticky"`로 두면 한 번 배정된 세션이 슬롯을 유지한다.
 
 `colors`는 6개 키에 표시되는 상태 색이다. 다섯 상태 중 바꾸고 싶은 것만 적으면 되고,
 `"#RRGGBB"` 문자열과 24비트 정수를 모두 받는다. 잘못된 값은 그 상태만 위의 기본값으로

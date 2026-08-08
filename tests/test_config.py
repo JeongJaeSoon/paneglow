@@ -10,7 +10,7 @@ from paneglow.state import AgentState
 def test_missing_file_gives_defaults(tmp_path: Path):
     cfg, warnings = load(tmp_path / "nope.json")
     assert cfg.gate_mode == "frontmost"
-    assert cfg.slots_order == "recent_sticky"
+    assert cfg.slots_order == "recent"
     assert warnings == []
 
 
@@ -23,7 +23,7 @@ def test_user_values_override(tmp_path: Path):
     cfg, _ = load(p)
     assert cfg.gate_mode == "always"
     assert cfg.poll_ms == 500
-    assert cfg.slots_order == "recent_sticky"  # untouched values keep defaults
+    assert cfg.slots_order == "recent"  # untouched values keep defaults
 
 
 def test_bad_value_falls_back_and_warns(tmp_path: Path):
@@ -113,7 +113,7 @@ def test_desktop_defaults_and_status_poll_cadence():
     cfg, warnings = load(None)
     assert cfg.own_when == ("com.anthropic.claudefordesktop",)
     assert cfg.yield_to == ("com.openai.codex",)
-    assert cfg.slots_order == "recent_sticky"
+    assert cfg.slots_order == "recent"
     assert cfg.status_poll_ms == 1000
     assert warnings == []
 
@@ -180,7 +180,7 @@ def test_slots_scope_layer_and_timing_values_are_loaded(tmp_path: Path):
 
 
 @pytest.mark.parametrize("section, key, value, expected", [
-    ("slots", "order", "random", "recent_sticky"),
+    ("slots", "order", "random", "recent"),
     ("layer_gate", "underglow", "flash", "keep"),
     ("underglow", "scope", "current", "outside"),
 ])
@@ -261,3 +261,14 @@ def test_colors_section_of_the_wrong_shape_is_ignored_with_a_warning(tmp_path: P
     cfg, warnings = load(p)
     assert cfg.colors[AgentState.IDLE] == 0xFFFFFF
     assert any("colors" in warning for warning in warnings)
+
+
+def test_slot_order_defaults_to_recency_to_match_the_desktop_sidebar(tmp_path: Path):
+    """The Desktop sidebar sorts by recency, so the keys follow it. Sticky slots
+    stay one setting away for anyone who mistypes under a reordering pad."""
+    assert Config().slots_order == "recent"
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"slots": {"order": "recent_sticky"}}))
+    cfg, warnings = load(p)
+    assert cfg.slots_order == "recent_sticky"
+    assert warnings == []
