@@ -105,7 +105,7 @@ def serve(paths: "cli.RuntimePaths", *, port: int = 0, open_browser: bool = True
               file=stderr)
         return 1
     url = f"http://127.0.0.1:{server.server_address[1]}/{server.token}/"
-    print(f"paneglow ui: {url}", file=stdout)
+    print(f"paneglow ui: {url}", file=stdout, flush=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     if open_browser:
