@@ -45,7 +45,7 @@ def test_mapping_constants_point_at_claude_desktop_account_files():
 
 def test_url_uses_the_exact_desktop_path_and_not_an_import_route():
     url = deeplink.url_for(LOCAL_ID)
-    assert url == f"claude://claude.ai/claude-code-desktop/{LOCAL_ID}"
+    assert url == f"claude://claude.ai/epitaxy/{LOCAL_ID}"
     assert "resume" not in url
 
 
@@ -169,7 +169,7 @@ def test_open_session_runs_absolute_open_with_an_argv_list(tmp_path: Path):
 
     assert deeplink.open_session(CLI_ID, [tmp_path], runner=runner) is True
     assert calls == [(
-        ["/usr/bin/open", f"claude://claude.ai/claude-code-desktop/{LOCAL_ID}"],
+        ["/usr/bin/open", f"claude://claude.ai/epitaxy/{LOCAL_ID}"],
         {"check": False, "timeout": 5.0},
     )]
     assert "shell" not in calls[0][1]

@@ -146,7 +146,7 @@ Claude Desktop 경로의 구현은 완료되어 있다.
 
 | 확인 항목 | 결과 |
 |---|---|
-| 세션 딥링크 | `claude://claude.ai/claude-code-desktop/<local_id>` |
+| 세션 딥링크 | `claude://claude.ai/epitaxy/<local_id>` |
 | `device.status` 왕복 | USB · BLE 양쪽 |
 | A1~A6 개별 색과 효과 | USB · BLE 양쪽 |
 | LED 효과 | solid · spin · rainbow · blink · pulse |

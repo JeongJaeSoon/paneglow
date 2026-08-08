@@ -155,3 +155,25 @@ import된 CLI 세션의 id는 `local_<cliSessionId>` 인데, **데스크톱 세�
 | 새로 만든 세션의 `local_*.json` 이 언제 쓰이는가 | 갓 생긴 세션은 잠시 매핑이 없을 수 있다 |
 | 앱이 꺼져 있을 때 | 실측 중 앱이 계속 떠 있었다. `open` 이 앱을 띄우는 것까지는 표준 동작 |
 | 계정이 여럿일 때 `<org>/<account>` 가 여러 개인 경우 | 실측 환경은 하나뿐이었다 |
+
+---
+
+## 6. 2026-08-08 추가 실측 — 전환 리로드와 `/epitaxy` 직행
+
+실기 acceptance 중 물리 A키로 세션이 정확히 열리지만 **전환할 때마다 화면이 처음부터
+다시 불려오는 리로드감**이 보고됐다. 딥링크만 반복 실행한 A/B 실험으로 패드 입력 경로와
+무관하게 재현됐으므로 원인은 딥링크 라우트 자체다.
+
+앱 번들(Claude.app 1.24012.9)의 라우트 rewrite 테이블에서 `/claude-code-desktop` 은
+`/epitaxy` 로 redirect되는 legacy 경로임을 확인했다.
+
+```js
+n = `/claude-code-desktop`, t = `/epitaxy`
+[{from: n, to: t}, {from: `${n}/onboarding`, to: t}, …]
+```
+
+`claude://claude.ai/epitaxy/<local_sessionId>` 로 직행하면 같은 세션 전환이 리로드 없이
+in-place로 일어난다는 것을 실제 세션 두 개를 3초 간격으로 반복 전환하며 사용자 육안으로
+확인했다(legacy 경로: 매번 전체 리로드감, `/epitaxy`: 부드러운 전환). 이에 따라
+`deeplink._ROUTE` 를 `/epitaxy` 직행으로 변경했다. legacy 경로도 여전히 동작하므로
+구버전 앱에서 문제가 생기면 되돌릴 수 있다.

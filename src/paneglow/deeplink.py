@@ -13,7 +13,10 @@ MAPPING_ROOT = (Path.home() / "Library" / "Application Support" / "Claude"
                 / "claude-code-sessions")
 MAPPING_GLOB = "*/*/local_*.json"
 
-_ROUTE = "claude://claude.ai/claude-code-desktop"
+# The legacy /claude-code-desktop route is rewritten to /epitaxy inside the
+# app and that redirect renders as a full reload; the direct route switches
+# sessions in place.
+_ROUTE = "claude://claude.ai/epitaxy"
 _OPEN_TIMEOUT_SECONDS = 5.0
 
 
