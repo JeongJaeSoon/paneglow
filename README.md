@@ -106,6 +106,13 @@ bounce의 원인이나 정확한 앱 focus 전환 시각을 판별할 수는 없
     "yield_to": ["com.openai.codex"]
   },
   "slots": {"order": "recent_sticky"},
+  "colors": {
+    "idle": "#FFFFFF",
+    "working": "#304FFE",
+    "waiting": "#FF6D00",
+    "done": "#00FF4C",
+    "error": "#FF0033"
+  },
   "layer_gate": {"underglow": "keep"},
   "underglow": {
     "claude": "#FF6D00",
@@ -122,6 +129,12 @@ bounce의 원인이나 정확한 앱 focus 전환 시각을 판별할 수는 없
   "timing": {"poll_ms": 250, "status_poll_ms": 1000}
 }
 ```
+
+`colors`는 6개 키에 표시되는 상태 색이다. 다섯 상태 중 바꾸고 싶은 것만 적으면 되고,
+`"#RRGGBB"` 문자열과 24비트 정수를 모두 받는다. 잘못된 값은 그 상태만 위의 기본값으로
+되돌리고 경고를 남긴다. 상태 판정 규칙(어떤 훅이 어떤 상태가 되는지)과 done 소등 시간은
+`colors`가 아니라 `state` 항목이 정한다. 테두리(underglow)는 소유권 색이므로 `underglow`가
+따로 관리한다.
 
 모든 값과 결정 근거는 [현재 설계 문서](docs/superpowers/specs/2026-08-02-desktop-session-model-design.md)에
 정리되어 있다.

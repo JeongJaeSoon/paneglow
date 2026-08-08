@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from paneglow.config import Config, load
+from paneglow.state import AgentState
 
 
 def test_missing_file_gives_defaults(tmp_path: Path):
@@ -221,3 +222,42 @@ def test_new_numeric_bounds_fall_back_and_warn(tmp_path: Path, section, key, val
     attr = key
     assert getattr(cfg, attr) == default
     assert any(key in warning for warning in warnings)
+
+
+def test_state_colours_default_to_the_factory_palette():
+    cfg, warnings = load(None)
+    assert cfg.colors == {
+        AgentState.IDLE: 0xFFFFFF,
+        AgentState.WORKING: 0x304FFE,
+        AgentState.WAITING: 0xFF6D00,
+        AgentState.DONE: 0x00FF4C,
+        AgentState.ERROR: 0xFF0033,
+    }
+    assert warnings == []
+
+
+def test_state_colours_are_customisable_one_state_at_a_time(tmp_path: Path):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"colors": {"working": "#00AAFF", "done": 0x101010}}))
+    cfg, warnings = load(p)
+    assert cfg.colors[AgentState.WORKING] == 0x00AAFF
+    assert cfg.colors[AgentState.DONE] == 0x101010
+    assert cfg.colors[AgentState.IDLE] == 0xFFFFFF   # untouched states keep defaults
+    assert warnings == []
+
+
+@pytest.mark.parametrize("value", ["FF0000", "#f00", -1, 0x1000000, True])
+def test_bad_state_colour_falls_back_and_warns(tmp_path: Path, value):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"colors": {"error": value}}))
+    cfg, warnings = load(p)
+    assert cfg.colors[AgentState.ERROR] == 0xFF0033
+    assert any("colors.error" in warning for warning in warnings)
+
+
+def test_colors_section_of_the_wrong_shape_is_ignored_with_a_warning(tmp_path: Path):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"colors": ["#FFFFFF"]}))
+    cfg, warnings = load(p)
+    assert cfg.colors[AgentState.IDLE] == 0xFFFFFF
+    assert any("colors" in warning for warning in warnings)

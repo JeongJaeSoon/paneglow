@@ -19,8 +19,6 @@ from typing import TextIO
 from paneglow import cli
 from paneglow.render import PALETTE
 
-_PALETTE_HEX = {state.value: f"#{colour:06X}" for state, colour in PALETTE.items()}
-
 
 def build_data(paths: cli.RuntimePaths) -> dict:
     """Assemble the ``/data`` payload.  Data problems never raise -- they
@@ -30,7 +28,8 @@ def build_data(paths: cli.RuntimePaths) -> dict:
         "status": "degraded",
         "detail": "",
         "snapshot": None,
-        "palette": _PALETTE_HEX,
+        "palette": {state.value: f"#{colour:06X}" for state, colour
+                    in getattr(cfg, "colors", PALETTE).items()},
         "reason_labels": cli._REASON_LABELS,
         "config_warnings": warnings,
     }

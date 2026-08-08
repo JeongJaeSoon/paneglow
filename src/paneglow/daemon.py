@@ -518,7 +518,7 @@ class Daemon:
         colours: list[int | None] = []
         for session_id in self.slots:
             state = self.effective_states.get(session_id) if session_id else None
-            colours.append(render.PALETTE[state] if state is not None else None)
+            colours.append(self.cfg.colors[state] if state is not None else None)
         return tuple(colours)
 
     def _ambient_value(self, now: float) -> int | None | tuple[int, str]:
