@@ -271,6 +271,22 @@ def test_done_faded_sessions_release_slots_instead_of_leaving_dark_holes():
                for session_id in d.slots if session_id is not None)
 
 
+def test_faded_full_board_stops_starving_a_quieter_live_session():
+    # Sticky eviction needs a strictly newer session, so six faded slots used to
+    # lock out a live session that had simply been quiet for longer.
+    faded = [f"f{index}" for index in range(6)]
+    snapshot = sessions.SessionSnapshot(
+        tuple(live(session_id, 1.0) for session_id in [*faded, "quiet"]), True, ())
+    records = (*(record(session_id, AgentState.DONE, 90.0)
+                 for session_id in faded),
+               record("quiet", AgentState.IDLE, 10.0))
+    d = build(cfg=Config(done_fade_seconds=5), snapshot=snapshot, records=records)
+    d.slots = list(faded)
+    d.tick(100.0)
+
+    assert d.slots == ["quiet", None, None, None, None, None]
+
+
 def test_effective_reason_distinguishes_no_hook_from_a_real_state():
     snapshot = sessions.SessionSnapshot(
         (live("unknown", 1), live("waiting", 2)), True, ())
