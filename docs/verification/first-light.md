@@ -158,6 +158,28 @@ USB/BLE protocol과 과거 실기 왕복 근거는 [하드웨어 실측 노트](
 이 실측에는 logout/login 또는 재부팅이 포함되지 않았다. 따라서 다음 로그인에서 별도
 `paneglow start` 없이 올라오는지는 여전히 사용자 입회 검증으로 남는다.
 
+## 2026-08-08 패드 물리 재연결과 라이브 파이프라인 실측
+
+`6319297` 설치본, daemon PID 68752 상태에서 패드가 물리적으로 부재인 구간과 재연결 구간을
+같은 daemon 수명 안에서 관측했다.
+
+- 패드 부재 중 `status`는 `pad unavailable (reconnect_failed)`를 보고했고 daemon은 세션
+  수집을 계속했다(`doctor`의 hook·session·mapping 검사는 그대로 통과). USB 트리에는
+  VID `0x303A`/PID `0x8360` 장치가 실제로 없었다.
+- 사용자가 패드를 USB로 연결하자 **daemon 재시작 없이** 같은 PID 68752가
+  `connected | USB | v0.4.1 | layer 1`, `status_verified=true`로 복구했고 테두리 상태
+  (`#FF6D00 solid`)까지 다시 그렸다. Issue #11의 "USB unplug/replug 뒤 자동 재연결하고
+  현재 상태를 다시 그린다" 중 replug 절반을 프로토콜 수준에서 실측한 것이다. LED의
+  시각적 확인과 unplug 방향 반복은 입회 항목으로 남는다.
+- 재연결 상태에서 `trace-input --seconds 5`는 이벤트 0건, truncated=false를 반환했다.
+  유휴 상태에서 phantom 입력·bounce가 없다는 표본이다.
+- 관측 중 live 세션이 2개에서 3개로 늘며 새 세션이 즉시 working 슬롯(A3)으로 배치됐다.
+  hook → daemon → slot 파이프라인이 라이브로 동작함을 보여준다.
+- `doctor`의 deep-link 검사는 매핑 없는 다른 프로젝트의 CLI 세션 1개 때문에
+  `unresolved (1)`로 실패했다. 이는 모든 live 세션의 매핑을 요구하는 문서화된 엄격성이며,
+  해당 CLI 세션을 닫거나 Desktop 세션으로 대체하면 통과한다. Desktop 매핑이 있는 세션의
+  resolve는 정상이었다.
+
 ## 남은 사용자 확인
 
 daemon을 시작한 뒤 Claude Desktop을 전면에 두고 다음 명령을 실행한다.
