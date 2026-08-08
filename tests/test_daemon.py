@@ -273,6 +273,8 @@ def test_every_live_session_on_the_board_lights_a_key_however_old_it_is():
 def test_a_full_board_evicts_a_finished_session_and_never_a_live_one():
     # A done session may well be the most recently active; activity alone used
     # to hand the eviction to a live session that had merely been quiet.
+    # Eviction is the sticky policy's business, so this names it rather than
+    # riding on whichever policy happens to be the default.
     held = ["d0", "a0", "d1", "a1", "d2", "a2"]
     snapshot = sessions.SessionSnapshot(
         tuple(live(session_id, 1.0) for session_id in [*held, "newcomer"]),
@@ -282,7 +284,8 @@ def test_a_full_board_evicts_a_finished_session_and_never_a_live_one():
         *(record(f"a{index}", AgentState.IDLE, 10.0 + index) for index in range(3)),
         record("newcomer", AgentState.IDLE, 50.0),
     )
-    d = build(snapshot=snapshot, records=records)
+    d = build(cfg=Config(slots_order="recent_sticky"), snapshot=snapshot,
+              records=records)
     d.slots = list(held)
     d.tick(200.0)
 
