@@ -37,6 +37,19 @@ def test_classify_maps_state_changing_events(name: str, expected: AgentState):
     assert hook.classify(event(name)) is expected
 
 
+def test_classify_ask_user_question_as_waiting():
+    payload = event("PreToolUse", tool_name="AskUserQuestion")
+    assert hook.classify(payload) is AgentState.WAITING
+
+
+@pytest.mark.parametrize("tool_name", ["Bash", "Edit", "", None, ["AskUserQuestion"]])
+def test_classify_other_pre_tool_use_as_working(tool_name: object):
+    payload = event("PreToolUse")
+    if tool_name is not None:
+        payload["tool_name"] = tool_name
+    assert hook.classify(payload) is AgentState.WORKING
+
+
 @pytest.mark.parametrize("notification_type", ["permission_prompt", "agent_needs_input"])
 def test_classify_whitelists_waiting_notifications(notification_type: str):
     assert hook.classify(

@@ -36,6 +36,11 @@ def classify(event: object) -> AgentState | None:
     if name == "SessionStart":
         return AgentState.IDLE
     if name in _WORKING_EVENTS:
+        # AskUserQuestion blocks on a dialog the moment PreToolUse fires, so
+        # it is a human-input state, not work. Elicitations that happen inside
+        # other tool calls emit no hook and cannot be classified here.
+        if name == "PreToolUse" and event.get("tool_name") == "AskUserQuestion":
+            return AgentState.WAITING
         return AgentState.WORKING
     if name == "Stop":
         return AgentState.DONE
