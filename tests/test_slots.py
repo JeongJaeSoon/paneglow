@@ -69,6 +69,14 @@ def test_non_sequence_previous_value_is_treated_as_empty():
     assert got == ["a", None, None, None, None, None]
 
 
+def test_recent_policy_keeps_a_live_session_over_a_more_recent_done_one():
+    """Only the choice of six changes; the six still show in recency order."""
+    live = {f"s{i}": float(i) for i in range(6)} | {"quiet": -1.0}
+    got = slots.assign(EMPTY, live, policy="recent",
+                       states={"s0": AgentState.DONE})
+    assert got == ["s5", "s4", "s3", "s2", "s1", "quiet"]
+
+
 def test_recent_policy_reorders_and_breaks_ties_by_session_id():
     prev = ["old", "new", None, None, None, None]
     live = {"old": 1.0, "z": 9.0, "a": 9.0}

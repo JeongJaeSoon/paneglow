@@ -63,12 +63,13 @@ def _recent_ids(live: Mapping[str, float]) -> list[str]:
     return sorted(live, key=lambda session_id: (-live[session_id], session_id))
 
 
-def _evict_rank(live: Mapping[str, float],
-                states: Mapping[str, AgentState] | None):
-    """Lowest rank loses its slot: a finished session before a merely quiet one.
+def _standing(live: Mapping[str, float],
+              states: Mapping[str, AgentState] | None):
+    """Highest standing keeps its key: a live session before a finished one.
 
     A finished session keeps its lit key, so ranking by activity alone would
-    evict a live session that had simply been quiet for longer.
+    give the key to a session that has just finished over one that is still
+    going and has simply been quiet for longer.
     """
     states = states or {}
     return lambda session_id: (
@@ -83,7 +84,7 @@ def _sticky(prev: Sequence[str | None] | None,
     held = {session_id for session_id in out if session_id is not None}
     incoming = [session_id for session_id in _recent_ids(live)
                 if session_id not in held]
-    rank = _evict_rank(live, states)
+    standing = _standing(live, states)
 
     for session_id in incoming:
         try:
@@ -91,18 +92,22 @@ def _sticky(prev: Sequence[str | None] | None,
         except ValueError:
             first_out = min(
                 range(COUNT),
-                key=lambda index: (rank(out[index]), index),  # type: ignore[arg-type]
+                key=lambda index: (standing(out[index]), index),  # type: ignore[arg-type]
             )
             current = out[first_out]
-            if current is not None and rank(session_id) > rank(current):
+            if current is not None and standing(session_id) > standing(current):
                 out[first_out] = session_id
         else:
             out[empty] = session_id
     return out
 
 
-def _ordered_recent(live: Mapping[str, float]) -> list[str | None]:
-    ranked = _recent_ids(live)[:COUNT]
+def _ordered_recent(live: Mapping[str, float],
+                    states: Mapping[str, AgentState] | None = None) -> list[str | None]:
+    recent = _recent_ids(live)
+    # Standing chooses which six get a key; recency still decides their order.
+    keep = set(sorted(recent, key=_standing(live, states), reverse=True)[:COUNT])
+    ranked = [session_id for session_id in recent if session_id in keep]
     return [*ranked, *([None] * (COUNT - len(ranked)))]
 
 
@@ -129,7 +134,7 @@ def assign(prev: Sequence[str | None] | None,
     """Assign live session IDs while preserving stable positions by default."""
     normalised_live = _normalise_live(live)
     if policy == "recent":
-        return _ordered_recent(normalised_live)
+        return _ordered_recent(normalised_live, states)
     if policy == "priority":
         return _ordered_priority(normalised_live, states)
     return _sticky(prev, normalised_live, states)
