@@ -200,7 +200,8 @@ PAGE_HTML = """<!doctype html>
 "use strict";
 const $ = id => document.getElementById(id);
 const esc = value => { const d = document.createElement("div");
-  d.textContent = String(value); return d.innerHTML; };
+  d.textContent = String(value);
+  return d.innerHTML.replaceAll('"', "&quot;").replaceAll("'", "&#39;"); };
 const chip = (label, value, bad) =>
   `<span class="chip${bad ? " bad" : ""}">${esc(label)} <b>${esc(value)}</b></span>`;
 
