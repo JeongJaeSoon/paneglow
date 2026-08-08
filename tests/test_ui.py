@@ -149,3 +149,16 @@ def test_ui_cli_dispatch(monkeypatch):
 
     assert cli.main(["ui", "--no-open", "--port", "8123"]) == 0
     assert calls == [{"port": 8123, "open_browser": False}]
+
+
+def test_ui_palette_reflects_the_configured_colours(tmp_path: Path, monkeypatch):
+    paths = paths_for(tmp_path)
+    paths.config_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.config_path.write_text(json.dumps({"colors": {"idle": "#101010"}}))
+    monkeypatch.setattr(cli, "_lock_is_held", lambda _path: False)
+
+    data = ui.build_data(paths)
+
+    assert data["palette"]["idle"] == "#101010"
+    assert data["palette"]["error"] == "#FF0033"
+    assert data["config_warnings"] == []

@@ -83,3 +83,9 @@ def test_unknown_state_stays_unknown():
         None, updated_at=0.0, now=1e9,
         working_max_seconds=0, done_fade_seconds=0,
     ) is None
+
+
+def test_session_keys_use_a_supplied_palette_over_the_factory_one():
+    palette = dict(PALETTE) | {AgentState.WAITING: 0x123456}
+    out = render_keys([Session("one", AgentState.WAITING)], palette=palette)
+    assert out[0] == 0x123456

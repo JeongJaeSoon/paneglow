@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from paneglow.protocol import EFFECTS
+from paneglow.render import PALETTE
+from paneglow.state import AgentState
 
 _GATE_MODES = {"frontmost", "always", "off"}
 _SCOPES = {"outside", "all_sessions", "off"}
@@ -21,7 +23,8 @@ class Config:
     gate_mode: str = "frontmost"
     yield_to: tuple[str, ...] = ("com.openai.codex",)
     own_when: tuple[str, ...] = ("com.anthropic.claudefordesktop",)
-    slots_order: str = "recent_sticky"
+    slots_order: str = "recent"
+    colors: dict[AgentState, int] = field(default_factory=lambda: dict(PALETTE))
     underglow_claude: int = 0xFF6D00
     underglow_codex: int = 0x304FFE
     effect_normal: str = "solid"
@@ -132,6 +135,7 @@ def load(path: Path | None) -> tuple[Config, list[str]]:
     state = _section(raw, "state", "state", warnings)
     slots = _section(raw, "slots", "slots", warnings)
     layer = _section(raw, "layer_gate", "layer_gate", warnings)
+    colors = _section(raw, "colors", "colors", warnings)
 
     effects_section = _section(glow, "effects", "underglow.effects", warnings)
     effects = {
@@ -153,8 +157,11 @@ def load(path: Path | None) -> tuple[Config, list[str]]:
                           "gate.yield_to", warnings),
         own_when=_strings(gate.get("own_when"), ("com.anthropic.claudefordesktop",),
                           "gate.own_when", warnings),
-        slots_order=_pick(slots.get("order"), _SLOT_ORDERS, "recent_sticky",
+        slots_order=_pick(slots.get("order"), _SLOT_ORDERS, "recent",
                           "slots.order", warnings),
+        colors={state: _colour(colors.get(state.value), default,
+                               f"colors.{state.value}", warnings)
+                for state, default in PALETTE.items()},
         underglow_claude=_colour(glow.get("claude"), 0xFF6D00,
                                  "underglow.claude", warnings),
         underglow_codex=_colour(glow.get("codex"), 0x304FFE,

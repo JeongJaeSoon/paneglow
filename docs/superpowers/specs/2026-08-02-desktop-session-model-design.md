@@ -257,7 +257,7 @@ def assign(prev: list[str | None],          # 직전 배정 (길이 6)
            policy: str) -> list[str | None]
 ```
 
-**`recent_sticky`(기본)** — 근육 기억을 지키는 정책이다.
+**`recent_sticky`** — 근육 기억을 지키는 정책이다.
 
 1. `prev` 에서 `live` 에 없는 세션의 슬롯을 비운다.
 2. 새 세션은 **빈 슬롯 중 가장 앞**에 넣는다. 여러 개면 최근 활동순.
@@ -267,7 +267,9 @@ def assign(prev: list[str | None],          # 직전 배정 (길이 6)
 밀려난 세션과 7번째 이후 세션은 **테두리 `alert` 집계**로 넘어간다 — 6키에도 테두리에도
 없어 완전히 사라지는 세션이 생기면 안 된다.
 
-**`recent`** — 매 틱 최근 활동순으로 재정렬. Codex 순정과 같은 동작.
+**`recent`(기본)** — 매 틱 최근 활동순으로 재정렬. Codex 순정과 같은 동작이고,
+Desktop 사이드바의 Sort by Recency와 키 순서를 맞춘다(#45). 대가는 키를 누르려는 순간
+대상이 바뀔 수 있다는 것이고, 그때는 `recent_sticky`로 되돌린다.
 **`priority`** — `waiting` > `error` > `done` > `working` > `idle` 순.
 
 ---
@@ -357,7 +359,7 @@ def normalize_transport(value: str) -> str:
     "yield_to": ["com.openai.codex"]
   },
   "layer_gate": { "agent_keys": "off", "underglow": "keep" },
-  "slots":  { "order": "recent_sticky" },         // recent_sticky | recent | priority
+  "slots":  { "order": "recent" },                // recent | recent_sticky | priority
   "underglow": {                                  // 테두리
     "claude": "#FF6D00",
     "codex":  "#304FFE",

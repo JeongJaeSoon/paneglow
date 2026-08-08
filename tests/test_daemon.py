@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from paneglow import daemon, pad as pad_module, protocol, sessions, store
+from paneglow import daemon, pad as pad_module, protocol, render, sessions, store
 from paneglow.config import Config
 from paneglow.state import AgentState
 
@@ -803,3 +803,12 @@ def test_daemon_close_fails_closed_when_frontmost_lookup_breaks():
     d.close()
     assert d.owner == "none"
     assert p.close_options == [(False, True)]
+
+
+def test_key_colours_follow_the_configured_palette():
+    snapshot = sessions.SessionSnapshot((live("s1", 1),), True, ())
+    cfg = Config(colors=dict(render.PALETTE) | {AgentState.WORKING: 0x123456})
+    d = build(cfg=cfg, snapshot=snapshot,
+              records=(record("s1", AgentState.WORKING, 0),))
+    d.tick(0)
+    assert d._key_colours()[0] == 0x123456

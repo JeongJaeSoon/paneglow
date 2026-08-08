@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, TypeVar
+from typing import Iterable, Mapping, TypeVar
 
 from paneglow.state import AgentState
 
 KEY_COUNT = 6
 
-#: Factory values. Matching what the vendor uses for Codex keeps the eye honest.
+#: Factory values, overridable per state through ``colors`` in the config.
+#: Matching what the vendor uses for Codex keeps the eye honest.
 PALETTE: dict[AgentState, int] = {
     AgentState.IDLE: 0xFFFFFF,
     AgentState.WORKING: 0x304FFE,
@@ -45,12 +46,13 @@ def effective_state(state: AgentState | None, *, updated_at: float, now: float,
     return state
 
 
-def render_keys(sessions: list[Session]) -> list[int | None]:
+def render_keys(sessions: list[Session],
+                palette: Mapping[AgentState, int] = PALETTE) -> list[int | None]:
     """Render six session colours in slot order. ``None`` means dark."""
     out: list[int | None] = [None] * KEY_COUNT
     for index, session in enumerate(sessions[:KEY_COUNT]):
         if session.state is not None:
-            out[index] = PALETTE[session.state]
+            out[index] = palette[session.state]
     return out
 
 
