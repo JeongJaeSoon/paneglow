@@ -36,6 +36,22 @@ def test_full_board_evicts_oldest_only_for_a_strictly_newer_session():
     assert slots.assign(prev, tied) == prev
 
 
+def test_eviction_takes_a_done_session_before_a_quieter_live_one():
+    """A finished session yields its key; a long-quiet live one keeps it."""
+    prev = [f"s{i}" for i in range(6)]
+    live = {f"s{i}": float(i) for i in range(6)} | {"fresh": 3.5}
+    states = {"s5": AgentState.DONE}
+    assert slots.assign(prev, live, states=states) == [
+        "s0", "s1", "s2", "s3", "s4", "fresh",
+    ]
+
+
+def test_a_done_newcomer_does_not_push_out_a_live_session():
+    prev = [f"s{i}" for i in range(6)]
+    live = {f"s{i}": float(i) for i in range(6)} | {"finished": 99.0}
+    assert slots.assign(prev, live, states={"finished": AgentState.DONE}) == prev
+
+
 def test_seven_sessions_from_empty_keep_the_six_most_recent():
     live = {f"s{i}": float(i) for i in range(7)}
     assert slots.assign(EMPTY, live) == ["s6", "s5", "s4", "s3", "s2", "s1"]

@@ -63,24 +63,39 @@ def _recent_ids(live: Mapping[str, float]) -> list[str]:
     return sorted(live, key=lambda session_id: (-live[session_id], session_id))
 
 
+def _evict_rank(live: Mapping[str, float],
+                states: Mapping[str, AgentState] | None):
+    """Lowest rank loses its slot: a finished session before a merely quiet one.
+
+    A finished session keeps its lit key, so ranking by activity alone would
+    evict a live session that had simply been quiet for longer.
+    """
+    states = states or {}
+    return lambda session_id: (
+        0 if states.get(session_id) is AgentState.DONE else 1,
+        live[session_id])
+
+
 def _sticky(prev: Sequence[str | None] | None,
-            live: Mapping[str, float]) -> list[str | None]:
+            live: Mapping[str, float],
+            states: Mapping[str, AgentState] | None = None) -> list[str | None]:
     out = _normalise_prev(prev, live)
     held = {session_id for session_id in out if session_id is not None}
     incoming = [session_id for session_id in _recent_ids(live)
                 if session_id not in held]
+    rank = _evict_rank(live, states)
 
     for session_id in incoming:
         try:
             empty = out.index(None)
         except ValueError:
-            oldest = min(
+            first_out = min(
                 range(COUNT),
-                key=lambda index: (live[out[index]], index),  # type: ignore[index]
+                key=lambda index: (rank(out[index]), index),  # type: ignore[arg-type]
             )
-            current = out[oldest]
-            if current is not None and live[session_id] > live[current]:
-                out[oldest] = session_id
+            current = out[first_out]
+            if current is not None and rank(session_id) > rank(current):
+                out[first_out] = session_id
         else:
             out[empty] = session_id
     return out
@@ -117,4 +132,4 @@ def assign(prev: Sequence[str | None] | None,
         return _ordered_recent(normalised_live)
     if policy == "priority":
         return _ordered_priority(normalised_live, states)
-    return _sticky(prev, normalised_live)
+    return _sticky(prev, normalised_live, states)

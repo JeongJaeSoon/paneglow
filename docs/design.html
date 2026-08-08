@@ -669,7 +669,7 @@ v.oai.hid (키) ──► MOD 상태 ──┴──► <b>[세대 확정?]</b> 
     "colors": { "waiting": "#FF6D00", "error": "#FF0033", "quiet": "off" }
   },
 
-  <b>"state"</b>: { "ttl_minutes": 30, "done_fade_seconds": 180 },
+  <b>"state"</b>: { "ttl_minutes": 30, "working_max_seconds": 900 },
   <b>"timing"</b>: { "poll_ms": 250, "mod_release_timeout_ms": 5000 },
 
   <b>"experimental"</b>: { "codex_status": { "enabled": false, "source": "ipc" } }
@@ -681,8 +681,10 @@ v.oai.hid (키) ──► MOD 상태 ──┴──► <b>[세대 확정?]</b> 
       <tr><td><code>gate.mode</code></td>
           <td><code>frontmost</code> 게이트 사용 · <code>always</code> 항상 우리 소유(ChatGPT 앱을 꺼야 함) ·
               <strong><code>off</code>는 paneglow 전체 비활성</strong>(패드를 건드리지 않음)</td></tr>
-      <tr><td><code>state.done_fade_seconds</code></td>
-          <td><strong>우리 설계 결정</strong>이다 — 공장의 “읽지 않음” 의미를 참고했을 뿐 하드웨어 동작이 아니다</td></tr>
+      <tr><td><code>state.working_max_seconds</code></td>
+          <td>Stop 훅 누락 대비 — 이 시간을 넘긴 <code>working</code>은 <code>idle</code> 흰색으로 바뀐다.
+              <strong>소등 타이머는 없다</strong>: live 세션 하나 = 켜진 키 하나이고, 키가 꺼지는 것은
+              세션 프로세스가 사라졌을 때뿐이다</td></tr>
       <tr><td>설정 오류</td>
           <td>해당 키만 기본값으로 폴백하고 <code>doctor</code>에 경고를 남긴다. 기동을 거부하지 않는다</td></tr>
     </tbody>
